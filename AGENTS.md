@@ -106,7 +106,7 @@ Related documents:
     │   └── opencode.sh           # renders opencode/opencode.json with master key file path
     │
     ├── opencode/
-    │   ├── opencode.template.json # 22-model provider template with __PORT__/__KEYFILE__ placeholders
+    │   ├── opencode.template.json # native V2 config: 22 gateway aliases + opencode/big-pickle, __PORT__/__KEYFILE__ placeholders
     │   └── opencode.json          # generated, git-ignored
     │
     ├── secrets/
@@ -557,7 +557,13 @@ bash cli-gateway/scripts/sessions.sh clear
 ```sh
 bash cli-gateway/scripts/opencode.sh
 ```
-Writes `cli-gateway/secrets/opencode.key` (master key) and `cli-gateway/opencode/opencode.json` from the template. Copy the JSON into a project or merge its `provider` block into `~/.config/opencode/opencode.json`.
+Writes `cli-gateway/secrets/opencode.key` (master key) and `cli-gateway/opencode/opencode.json` from the native V2 template (`providers` / `package` / `settings` / `capabilities`, with `agents.title.model` replacing V1 `small_model`). Copy the JSON into a project or merge its `providers` block into `~/.config/opencode/opencode.json`.
+
+The generated config exposes two provider groups:
+- `gateway/<alias>` — all 22 aliases from `config.yaml`; requires this host, the running gateway, and the absolute `{file:...}` key path baked in by the script. On another machine both the key file and `127.0.0.1:4000` must be provided again.
+- `opencode/big-pickle` — the current OpenCode free-tier model, inherited from the built-in provider via `canonical: "opencode"`. It is a **separate, OpenCode-native** model, not part of `light` or any gateway fallback chain. OpenCode's Inference API rejects free-tier models from non-OpenCode clients (HTTP 403), so LiteLLM cannot proxy it. It needs an OpenCode Console sign-in (`/connect`) or `OPENCODE_API_KEY` in that project; credentials do not carry over between projects.
+
+Verified on OpenCode v2.3.2 with a copied config: `opencode models` listed all 22 `gateway/*` entries plus `opencode/big-pickle`, and both `opencode run --model gateway/light "Reply with exactly: pong"` and `opencode run --model opencode/big-pickle "Reply with exactly: pong"` answered `pong`.
 
 ### 10.6 Direct API call (without printing the key)
 
@@ -757,13 +763,14 @@ Existing nginx routes (`/p/`, `/admin`, `/cytogame/`) were left untouched; `/p/`
 | scripts say `Permission denied` | scripts are mode 0644 | invoke with `bash …` or `chmod +x` deliberately |
 | `muse usage` says `no_allowance` | Muse CLI is not subscription-backed | rely on `META_API_KEY`/contributor credit; measure before promoting in chains |
 | `brev` expected as a model | it is GPU infrastructure, not an LLM | see `MASTER_PLAN.md` §7; out of scope for v1 |
+| `opencode/big-pickle` expected in `light` | OpenCode free-tier models are OpenCode-only; other clients get HTTP 403 | keep it as a separate native `opencode/*` model; only gateway aliases belong in fallback chains |
 
 Additional caveats:
 - Muse binary is ~417 MB in `secrets/cli-state/muse-bin/`; account for this in backups.
 - `GEMINI_API_KEY_alt` is assumed to be a separate quota bucket; not yet proven.
 - Claude OAuth token env var is intentionally empty; credentials are mounted.
 - OpenCode template default is still `gateway/nemotron-super`, not `heavy`/`light`.
-- No `git init` yet.
+- Git repo is initialised; no secret files are tracked.
 
 ---
 

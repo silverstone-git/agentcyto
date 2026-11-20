@@ -31,8 +31,10 @@ scripts/smoke.sh                                       # one "pong" per model, s
 scripts/opencode.sh                                    # writes opencode/opencode.json for this machine
 ```
 
-Then copy `opencode/opencode.json` into a project (or merge its `provider` block into
-`~/.config/opencode/opencode.json`) and pick `gateway/<model>` in OpenCode.
+Then copy `opencode/opencode.json` into a project (or merge its `providers` block into
+`~/.config/opencode/opencode.json`) and pick `gateway/<model>` in OpenCode. The generated
+file is native V2 config and also exposes `opencode/big-pickle` as a separate, OpenCode-native
+free-tier model (not part of the `light` chain, and not proxyable through LiteLLM).
 
 ## Additions (2026-11-20)
 
