@@ -1,0 +1,63 @@
+name: cli-gateway
+
+# Non-secret settings shared by the gateway and the on-demand tool container.
+x-gateway-env: &gateway-env
+  CLI_STATE_DIR: /state
+  CLI_SCRATCH_DIR: /scratch
+  CLI_WORKSPACE_DIR: /workspaces
+  CLI_TIMEOUT_SECONDS: ${CLI_TIMEOUT_SECONDS:-900}
+  CLI_MAX_PARALLEL: ${CLI_MAX_PARALLEL:-2}
+  CLI_SYSTEM_PROMPT: ${CLI_SYSTEM_PROMPT:-drop}
+  GATEWAY_URL: http://gateway:4000
+
+x-gateway-volumes: &gateway-volumes
+  - ./gateway:/app:ro
+  # Pre-staged host CLI logins (see secrets/cli-state/, chmod 700, git-ignored).
+  - ./secrets/cli-state/claude:/home/app/.claude
+  - ./secrets/cli-state/gemini:/home/app/.gemini
+  - ./secrets/cli-state/muse:/home/app/.config/muse
+  - ./secrets/cli-state/antigravity:/home/app/.config/antigravity
+  - ./secrets/cli-state/agy-cache:/home/app/.cache/antigravity
+  - ./secrets/cli-state/muse-bin:/opt/muse/bin
+  - gateway-state:/state
+  - ${WORKSPACE_DIR:-./workspace}:/workspaces
+
+services:
+  gateway:
+    build:
+      context: .
+      args:
+        APP_UID: ${APP_UID:-1000}
+        INSTALL_AGY: ${INSTALL_AGY:-1}
+    image: cli-gateway:local
+    env_file:
+      - path: secrets/gateway.env
+        required: true
+    environment: *gateway-env
+    volumes: *gateway-volumes
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-4000}:4000"
+    mem_limit: ${GATEWAY_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # On-demand tool container: logins, key checks, smoke tests.
+  #   docker compose run --rm cli <command>
+  cli:
+    profiles: [tools]
+    image: cli-gateway:local
+    env_file:
+      - path: secrets/gateway.env
+        required: true
+    environment: *gateway-env
+    volumes: *gateway-volumes
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["bash"]
+
+volumes:
+  gateway-state:

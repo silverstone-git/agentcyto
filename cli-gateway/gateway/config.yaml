@@ -1,0 +1,124 @@
+# LiteLLM proxy config. Model names on the left (model_name) are what clients see.
+# Secrets come from env (secrets/gateway.env) via os.environ/NAME.
+
+model_list:
+  # ---------- Preference aliases (best -> worst via router fallbacks) ----------
+  - model_name: heavy
+    litellm_params: {model: cli/claude@opus, num_retries: 0}
+  - model_name: heavy-tool
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: light
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: light-tool
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+
+  # ---------- Logged-in CLIs (custom provider: cli_provider.py) ----------
+  # chat = CLI tools off, runs in an empty dir; agent = CLI uses its own tools
+  # in a per-conversation subdir of /workspaces.
+  - model_name: claude-cli
+    litellm_params: {model: cli/claude, num_retries: 0}
+  - model_name: claude-cli-opus
+    litellm_params: {model: cli/claude@opus, num_retries: 0}
+  - model_name: claude-agent
+    litellm_params: {model: cli/claude-agent, num_retries: 0}
+  - model_name: agy-cli
+    litellm_params: {model: cli/agy, num_retries: 0}
+  - model_name: agy-agent
+    litellm_params: {model: cli/agy-agent, num_retries: 0}
+  - model_name: muse-cli
+    litellm_params: {model: cli/muse, num_retries: 0}
+  - model_name: muse-cli-wonder
+    litellm_params: {model: cli/muse@muse-wonder-1.0, num_retries: 0}
+  - model_name: muse-cli-ember
+    litellm_params: {model: cli/muse@muse-ember-1.0, num_retries: 0}
+  - model_name: muse-agent
+    litellm_params: {model: cli/muse-agent, num_retries: 0}
+  - model_name: muse-agent-contributor
+    litellm_params: {model: cli/muse-agent@muse-spark-1.3-contributor, num_retries: 0}
+
+  # ---------- NVIDIA NIM (free) ----------
+  - model_name: nemotron-super
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: nemotron-ultra
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: nemotron-lightning
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+  - model_name: nemotron-bolt
+    litellm_params:
+      model: nvidia_nim/nvidia/nemotron-3.5-bolt-e4b
+      api_key: os.environ/NVIDIA_NIM_API_KEY
+
+  # ---------- Gemini API (two keys = independent free-tier quotas) ----------
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-flash-latest
+      api_key: os.environ/GEMINI_API_KEY
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-flash-latest
+      api_key: os.environ/GEMINI_API_KEY_ALT
+  - model_name: gemini-flash-lite
+    litellm_params:
+      model: gemini/gemini-flash-lite-latest
+      api_key: os.environ/GEMINI_API_KEY
+  - model_name: gemini-flash-lite
+    litellm_params:
+      model: gemini/gemini-flash-lite-latest
+      api_key: os.environ/GEMINI_API_KEY_ALT
+
+  # ---------- Meta Model API ----------
+  - model_name: muse-spark
+    litellm_params:
+      model: meta/muse-spark-1.3
+      api_key: os.environ/META_API_KEY
+  - model_name: muse-spark-cheap
+    litellm_params:
+      model: meta/muse-spark-1.3-contributor
+      api_key: os.environ/META_API_KEY
+
+litellm_settings:
+  drop_params: true          # silently drop params a provider doesn't support
+  request_timeout: 900       # CLI agent turns can take minutes
+  custom_provider_map:
+    - {"provider": "cli", "custom_handler": cli_provider.handler}
+
+router_settings:
+  num_retries: 2
+  allowed_fails: 1
+  cooldown_time: 60
+  fallbacks:
+    # Mode aliases.
+    - {"heavy": ["muse-spark", "nemotron-ultra", "claude-cli", "muse-cli", "nemotron-super", "gemini-flash", "agy-cli", "gemini-flash-lite", "nemotron-lightning"]}
+    - {"heavy-tool": ["muse-spark", "nemotron-super", "gemini-flash", "gemini-flash-lite", "nemotron-bolt"]}
+    - {"light": ["gemini-flash-lite", "gemini-flash", "nemotron-super", "muse-cli", "claude-cli"]}
+    - {"light-tool": ["gemini-flash-lite", "gemini-flash", "nemotron-super", "nemotron-bolt"]}
+    # Concrete chat aliases.
+    - {"claude-cli": ["agy-cli", "muse-cli", "nemotron-super"]}
+    - {"claude-cli-opus": ["claude-cli", "muse-spark", "nemotron-ultra"]}
+    - {"agy-cli": ["muse-cli", "nemotron-super", "gemini-flash"]}
+    - {"muse-cli": ["nemotron-super", "gemini-flash"]}
+    - {"nemotron-ultra": ["nemotron-super", "gemini-flash"]}
+    - {"nemotron-super": ["gemini-flash", "nemotron-bolt", "nemotron-lightning"]}
+    - {"nemotron-bolt": ["gemini-flash-lite", "nemotron-lightning"]}
+    - {"nemotron-lightning": ["gemini-flash-lite"]}
+    - {"gemini-flash": ["nemotron-super", "gemini-flash-lite"]}
+    - {"gemini-flash-lite": ["nemotron-lightning"]}
+    - {"muse-spark": ["muse-spark-cheap", "nemotron-ultra", "nemotron-super"]}
+    - {"muse-spark-cheap": ["nemotron-super"]}
+    # Agent models intentionally have NO fallback: never hand a half-finished
+    # edit to a different model. They are explicit choices in the UI.
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

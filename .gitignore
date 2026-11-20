@@ -1,0 +1,9 @@
+.env
+secrets/
+*.db
+dist/
+node_modules/
+workspaces/
+.claude/
+cli-gateway/secrets/cli-state/
+cli-gateway/secrets/gateway.env
