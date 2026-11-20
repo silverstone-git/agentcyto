@@ -5,5 +5,10 @@ dist/
 node_modules/
 workspaces/
 .claude/
+__pycache__/
+*.pyc
 cli-gateway/secrets/cli-state/
 cli-gateway/secrets/gateway.env
+
+agentcyto/state/*
+!agentcyto/state/.keep

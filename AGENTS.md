@@ -25,7 +25,7 @@ Related documents:
 - Don't add `muse`/`claude`/`agy` credentials to the Docker image; they are runtime mounts only.
 - Don't give `*-agent` models an automatic fallback chain. A half-finished edit must not be handed to another model.
 - Don't remove `drop_params: true` or the 900 s timeouts without understanding CLI/tool incompatibilities.
-- Don't assume the nginx route, BFF, or frontend exists yet — they are planned, not deployed.
+- Don't expose the gateway or BFF directly; only nginx `/agentcyto/` is public.
 
 ---
 
@@ -33,21 +33,21 @@ Related documents:
 
 **Date of this document:** 2026-11-20
 
-**Completed locally (Phases 0–1 of `MASTER_PLAN.md`):**
+**Completed locally (Phases 0–5 of `MASTER_PLAN.md`):**
 - Root `./.env` holds all provider keys; `cli-gateway/secrets/gateway.env` is generated from it.
 - Three CLI logins are staged into `cli-gateway/secrets/cli-state/` and bind-mounted into containers.
 - Docker image builds cleanly; gateway is healthy on `127.0.0.1:4000`.
 - Muse Code support added to the custom provider; all four CLI families work (`claude`, `agy`, `muse`, plus agent variants).
 - Preference aliases `heavy`, `heavy-tool`, `light`, `light-tool` exist with ordered fallback chains.
-- Per-conversation agent workspaces under `./workspaces/` are created and isolated.
+- BFF on `127.0.0.1:8890`: SQLite session/message/job journal, durable workers, SSE replay, usage/budget guard, static UI.
+- `cli_provider.py` scopes CLI sessions and agent workspaces to a browser session via `X-Agentcyto-Session`.
+- nginx route `/agentcyto/` with basic auth is live on `https://t.aryan.cfd/agentcyto/`.
+- Git repository initialised with a baseline commit; no secret files tracked.
 
-**Not yet built (Phases 2–6):**
-- BFF service with durable jobs, session journal, reconnect/resume, budget guard.
-- Static frontend.
-- nginx `/agentcyto/` route with `AUTHKEY` basic auth.
-- Backups, monitoring, failover drills.
-
-The workspace is **not yet a git repository**. Initialise git before making broad edits so changes are reviewable.
+**Not yet built (Phase 6 + open drills):**
+- Backups, monitoring, failover/fallback drills.
+- Workspace size cap + TTL, per-session/IP rate limiting.
+- Real-browser reconnect test, Gemini alt-quota and Muse credit measurement (`certbot renew --dry-run` passed).
 
 ---
 
@@ -59,8 +59,26 @@ The workspace is **not yet a git repository**. Initialise git before making broa
 ├── MASTER_PLAN.md                # roadmap, decisions, acceptance tests
 ├── .env                          # root secrets (git-ignored, never printed)
 ├── .gitignore                    # ignores .env, secrets/, *.db, dist/, node_modules/, workspaces/, .claude/
+├── TODO.md                       # work queue / verification checklist (live status)
 ├── workspaces/                   # per-conversation agent working dirs (created at runtime)
-│   └── <16-hex-conversation-id>/
+│   └── <hex-session-id>/
+│
+├── agentcyto/                    # BFF + static UI (Phase 2–4)
+│   ├── bff/
+│   │   ├── app.py                # FastAPI routes, job worker, SSE, auth boundary
+│   │   ├── db.py                 # SQLite schema + helpers, gateway session-map cleanup
+│   │   ├── modes.yaml            # mode → alias mapping, budget, price estimates
+│   │   ├── requirements.txt
+│   │   └── Dockerfile            # uid 1001, serves UI from /app/ui
+│   ├── state/
+│   │   ├── .keep
+│   │   └── agentcyto.db          # git-ignored, WAL mode
+│   ├── ui/
+│   │   ├── index.html
+│   │   ├── app.js
+│   │   └── styles.css
+│   └── scripts/
+│       └── deploy.sh             # htpasswd + nginx test/reload
 │
 └── cli-gateway/
     ├── .env                      # non-secret Compose settings (APP_UID, WORKSPACE_DIR, timeouts…)
@@ -115,11 +133,17 @@ The workspace is **not yet a git repository**. Initialise git before making broa
 ## 3. Runtime topology
 
 ```
-OpenCode / future BFF / curl
-        │  Authorization: Bearer <LITELLM_MASTER_KEY>
+Browser ── basic auth (AUTHKEY) ──▶ nginx /agentcyto/
+        │                              │
+        │                              ├── static UI (served by BFF at /)
+        │                              ▼
+        │                         BFF 127.0.0.1:8890
+        │                         - SQLite journal + durable jobs + SSE replay
+        │                         - X-Agentcyto-Session: <hex-session-id>
+        │                         - workspace /workspaces/<hex-session-id>
         ▼
-LiteLLM proxy  (container: cli-gateway-gateway-1)
-  127.0.0.1:4000  ── /health/liveliness
+OpenCode / curl ──────────────────▶ LiteLLM proxy (cli-gateway-gateway-1)
+                                    127.0.0.1:4000 ── /health/liveliness
         │
         ├── nvidia_nim/*  ──▶ integrate.api.nvidia.com   (free tier)
         ├── gemini/*      ──▶ generativelanguage.googleapis.com (2 keys)
@@ -131,17 +155,17 @@ LiteLLM proxy  (container: cli-gateway-gateway-1)
               └── cli/muse[…]     ──▶ muse exec --json --prompt-file … --session-id …
                     │
                     ├── chat  → cwd /scratch, tools off
-                    └── agent → cwd /workspaces/<conversation-id>, tools on
+                    └── agent → cwd /workspaces/<session-id>, tools on
 ```
 
 Request flow for a CLI model:
-1. LiteLLM receives `/v1/chat/completions` with a `model` name from `config.yaml`.
-2. `cli_provider.CLIProvider` delegates to `run_turn(model, messages)`.
+1. LiteLLM receives `/v1/chat/completions` with a `model` name from `config.yaml`; the BFF also sends `X-Agentcyto-Session: <hex-id>`.
+2. `cli_provider.CLIProvider` extracts that header from `kwargs["litellm_params"]["metadata"]["headers"]` (verified on LiteLLM 1.110.1 — the top-level `headers` kwarg is empty) and delegates to `run_turn(model, messages, session)`.
 3. `split_messages()` normalises roles/text; system messages are dropped by default (`CLI_SYSTEM_PROMPT=drop`).
-4. `history_key()` hashes `(scope, prior_history)`. A hit resumes the native CLI session; a miss replays prior turns as a transcript.
+4. `history_key()` hashes `(session, scope, prior_history)`. A hit resumes the native CLI session; a miss replays prior turns as a transcript. Without a header the original two-field key is kept, so OpenCode conversations still resume.
 5. `run_cli()` spawns the CLI under a global semaphore (`CLI_MAX_PARALLEL=2`) with a `CLI_TIMEOUT_SECONDS=900` deadline.
 6. Provider output is parsed into streamed deltas + one final `Result` (text, session id, tokens, error).
-7. On success, `SessionStore.put()` records `hash(history + our reply) → native session id` in `/state/sessions.db`.
+7. On success, `SessionStore.put()` records `hash(history + our reply) → native session id` in `/state/sessions.db`, with `scope = "<session>|<tool|role|model>"` so `DELETE /api/sessions/{id}` can clear it.
 
 ---
 
@@ -159,7 +183,7 @@ Request flow for a CLI model:
 | Node on host | available via nvm, but frontend is plain static JS (no framework) |
 | Ports already used | `8879`, `8080`, `8090`, `22`, `80`, `443` |
 | Gateway port | `127.0.0.1:4000` only |
-| Future BFF port | planned `127.0.0.1:8890` |
+| BFF port | `127.0.0.1:8890` (live) |
 | Domain | `t.aryan.cfd`, `www.t.aryan.cfd` (Cloudflare-proxied nginx) |
 | Cloudflare rule | user deployed: `http.request.full_uri wildcard r"https://t.aryan.cfd/agentcyto/*"` → Bypass |
 
@@ -233,6 +257,7 @@ All state lives under `cli-gateway/secrets/cli-state/` (git-ignored, mode 700 di
 | Service | Purpose | Network | Notes |
 |---|---|---|---|
 | `gateway` | long-running LiteLLM proxy | `127.0.0.1:4000` | `restart: unless-stopped`, healthcheck every 30 s, `mem_limit: 2g` |
+| `bff` | FastAPI BFF + static UI | `127.0.0.1:8890` | `restart: unless-stopped`, healthcheck, uid 1001, mounts `../agentcyto/state:/state`, `gateway-state:/gateway-state`, workspaces |
 | `cli` | on-demand tool container | none (profile `tools`) | same image/env/volumes; used for `check.sh`, `smoke.sh`, `sessions.sh`, logins |
 
 Shared environment anchor `x-gateway-env`:
@@ -386,12 +411,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 `run_turn()` derives:
 
 ```python
-workspace_id = sha256(json.dumps([spec.scope, first_user_text])).hexdigest()[:16]
+workspace_id = session or sha256(json.dumps([spec.scope, first_user_text])).hexdigest()[:16]
 ```
 
-Agent `cwd` becomes `/workspaces/<workspace_id>` (host: `./workspaces/<workspace_id>`). This is stable across turns of the same conversation and distinct across different first messages. Observed: three agent smoke tests created three distinct directories.
+When the BFF sends `X-Agentcyto-Session`, the agent `cwd` is `/workspaces/<hex-session-id>`; the BFF creates that directory first (0700, uid 1001) with a hex-only allow-list, so no two sessions share files and traversal is impossible. Without the header (OpenCode/direct calls), the legacy first-message hash is used, keeping earlier workspaces stable. Observed: three early smoke tests created three distinct hashed directories; two identical-text BFF sessions created two distinct session-named directories.
 
-This is **not yet browser-session-scoped**: a BFF Phase 2 should inject `X-Agentcyto-Session` and include it in both `history_key` and `workspace_id` to eliminate identical-history collisions.
+The session id is also part of `history_key()` and is stored as the prefix of `scope` in `sessions.db`, so clearing a browser session can drop its native CLI session map.
 
 ### 8.6 Command construction — `build_command()`
 
@@ -476,7 +501,8 @@ These codes are what LiteLLM's router uses for fallback decisions.
 | AGY state | `/home/app/.gemini`, `~/.config/antigravity`, `~/.cache/antigravity` | OAuth, conversations, history | multiple dirs required |
 | Agent workspaces | `./workspaces/<id>/` | files edited by agent models | one dir per conversation; TTL cleanup not implemented yet |
 | Muse binary | `./secrets/cli-state/muse-bin/` | launcher + 417 MB binary | large; include in backup planning |
-| Future BFF DB | planned `agentcyto/state/agentcyto.db` | transcripts, jobs, usage, health | Phase 2; not created yet |
+| BFF DB | `agentcyto/state/agentcyto.db` (host) → `/state` in `bff` | sessions, messages, jobs, job_events, usage, health | WAL mode; git-ignored; survives BFF restarts |
+| BFF session-map access | `gateway-state:/gateway-state` in `bff` | read/write access to `sessions.db` | only used by `DELETE /api/sessions/{id}` |
 
 ---
 
@@ -556,6 +582,41 @@ docker compose --project-directory cli-gateway exec -T gateway \
 
 This writes `muse-bin-<version>` into the host bind mount. Verify ownership stays `app:app` (uid 1001).
 
+### 10.8 BFF build / start / API
+
+```sh
+docker compose --project-directory cli-gateway build bff
+docker compose --project-directory cli-gateway up -d bff
+docker compose --project-directory cli-gateway logs --tail 100 bff
+```
+
+All `/api/*` calls require the `X-Auth-User` header nginx injects (set `REQUIRE_AUTH_HEADER=0` only for local debugging). `/api/health` is exempt for the container healthcheck.
+
+```sh
+# no secrets in any of these responses
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/health
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/modes
+curl -sS -H 'X-Auth-User: local' -H 'Content-Type: application/json' \
+  -d '{"name":"probe"}' http://127.0.0.1:8890/api/sessions
+curl -sS -H 'X-Auth-User: local' -H 'Content-Type: application/json' \
+  -d '{"mode":"light","role":"chat","message":"Reply with exactly: pong"}' \
+  http://127.0.0.1:8890/api/chat
+# then: GET /api/jobs/<job_id> and GET /api/stream?job_id=<job_id>&after=0
+```
+
+### 10.9 Public route
+
+```sh
+bash agentcyto/scripts/deploy.sh            # refresh htpasswd, nginx -t, reload
+KEY=$(grep -E '^AUTHKEY=' .env | tail -n1 | cut -d= -f2-)
+curl -sS -o /dev/null -w '%{http_code}\n' -u "agentcyto:$KEY" \
+  https://t.aryan.cfd/agentcyto/api/health   # 200
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://t.aryan.cfd/agentcyto/             # 401
+```
+
+Never echo `$KEY`.
+
 ---
 
 ## 11. Verification after changes
@@ -564,12 +625,13 @@ Run all applicable:
 
 ```sh
 python3 -m py_compile cli-gateway/gateway/cli_provider.py \
-  cli-gateway/gateway/tools/*.py
-python3 -c 'import yaml; yaml.safe_load(open("cli-gateway/gateway/config.yaml"))'
+  cli-gateway/gateway/tools/*.py agentcyto/bff/*.py
+python3 -c 'import yaml; yaml.safe_load(open("cli-gateway/gateway/config.yaml")); yaml.safe_load(open("agentcyto/bff/modes.yaml"))'
 python3 -c 'import json; json.load(open("cli-gateway/opencode/opencode.template.json"))'
 docker compose --project-directory cli-gateway config --quiet
 bash cli-gateway/scripts/check.sh
 bash cli-gateway/scripts/smoke.sh heavy light muse-cli muse-agent claude-agent agy-agent
+curl -fsS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/health >/dev/null
 ```
 
 Expected smoke results from the current build:
@@ -596,14 +658,15 @@ Three different agent smoke tests should produce three different IDs.
 |---|---|
 | Provider keys | Only in root `./.env` and generated `secrets/gateway.env` (chmod 600) |
 | Master key | Only in `gateway.env`; injected into LiteLLM; never sent to browser |
-| Dashboard password | `AUTHKEY` in root `.env`; Phase 5 nginx basic auth, username `agentcyto` |
+| Dashboard password | `AUTHKEY` in root `.env`; nginx basic auth (username `agentcyto`) → `.htpasswd-agentcyto` |
 | Gateway network | Loopback only (`127.0.0.1:4000`) |
+| BFF network | Loopback only (`127.0.0.1:8890`); rejects API calls without nginx's `X-Auth-User` |
 | CLI credentials | Host files bind-mounted at runtime; never in image layers |
-| Agent file access | Scoped to `/workspaces/<conversation>`; `--yolo` only inside that dir |
-| Cross-session leakage | Hash-based conversation IDs; full browser-session isolation deferred to BFF |
+| Agent file access | Scoped to `/workspaces/<hex-session-id>` (0700); `--yolo` only inside that dir |
+| Cross-session leakage | Session id in both `history_key()` and workspace path; no two browser sessions share CLI sessions or files |
 | Free-tier privacy | Gemini free prompts may be used by Google; Muse contributor prompts may be used for training (user approved) |
 | Account risk | README warns about AGY/Claude CLI ToS; use disposable accounts |
-| Cloudflare | Cache Bypass rule already deployed for `/agentcyto/*`; still add no-store/SSE headers in nginx |
+| Cloudflare | Cache Bypass rule for `/agentcyto/*` plus nginx `Cache-Control: no-store`, `proxy_buffering off`, SSE timeouts |
 | Logging | Never log request bodies or secret values; `check.sh` prints lengths only |
 
 If a secret is ever exposed in chat or logs, rotate it immediately at the provider and regenerate `secrets/gateway.env` / htpasswd.
@@ -643,13 +706,20 @@ If a secret is ever exposed in chat or logs, rotate it immediately at the provid
 2. Update root `./.env` and regenerate `secrets/gateway.env`.
 3. Recreate containers: `docker compose up -d --force-recreate gateway`.
 4. Run `check.sh` and `smoke.sh`.
-5. For `AUTHKEY`, regenerate htpasswd in Phase 5.
+5. For `AUTHKEY`, regenerate htpasswd with `bash agentcyto/scripts/deploy.sh`.
+
+### 13.6 Change a mode mapping or budget without a rebuild
+
+1. Edit `agentcyto/bff/modes.yaml` (mode → chat/agent alias, `allow_paid`, `daily_budget_usd`, price estimates).
+2. `POST /api/admin/reload` with `X-Auth-User` set, or restart the `bff` container.
+3. Verify `GET /api/modes` and run one chat per changed mode.
+4. BFF code/static UI changes require `docker compose --project-directory cli-gateway build bff && up -d bff`; DB schema changes require a migration (the current `CREATE TABLE IF NOT EXISTS` does not alter existing tables).
 
 ---
 
-## 14. Deployment plan (pending, see MASTER_PLAN Phases 2–5)
+## 14. Deployment topology (live, see MASTER_PLAN Phases 2–5)
 
-Do not expose the gateway directly. Target path:
+Do not expose the gateway directly. Current path:
 
 ```
 Browser
@@ -661,13 +731,14 @@ BFF (127.0.0.1:8890)
 LiteLLM gateway (127.0.0.1:4000)
 ```
 
-nginx changes required before `location /` in `/etc/nginx/sites-available/t.aryan.cfd`:
+nginx changes applied before `location /` in `/etc/nginx/sites-available/t.aryan.cfd` (backup `.bak-agentcyto`):
 - `location = /agentcyto { return 301 /agentcyto/; }`
 - `location /agentcyto/ { auth_basic …; proxy_pass http://127.0.0.1:8890/; proxy_buffering off; proxy_read_timeout 900s; add_header Cache-Control "no-store" always; }`
-- `htpasswd` must be installed first; generate with `printf '%s' "$AUTHKEY" | htpasswd -i -c /etc/nginx/.htpasswd-agentcyto agentcyto`.
+- Static UI is served by the BFF at `/`, so no `alias` location is needed.
+- `apache2-utils` installed; htpasswd generated from `AUTHKEY` via `agentcyto/scripts/deploy.sh` (never echoes it).
 - `nginx -t && systemctl reload nginx`.
 
-Existing nginx routes (`/p/`, `/admin`, `/cytogame/`) must remain untouched.
+Existing nginx routes (`/p/`, `/admin`, `/cytogame/`) were left untouched; `/p/` and `/cytogame/` re-verified at 200.
 
 ---
 
@@ -679,7 +750,7 @@ Existing nginx routes (`/p/`, `/admin`, `/cytogame/`) must remain untouched.
 | `installed binary is missing; rerun the installer` | Muse binary volume empty/root-owned | run `MUSE_LAUNCHER_INSTALL=1 muse`; keep host bind mount owned by uid 1001 |
 | `TMPDIR '/tmp' produced … inside workspace` | cwd == TMPDIR | `cd /scratch` and `export TMPDIR=/tmp` |
 | NIM `MISSING: nemotron-3-super-120b-a12b` | provider catalog drift | already fixed to `nemotron-3.5-super-vl-120b-a12b`; keep `check_keys.py` current |
-| agent writes into another session's files | shared workspace | keep per-conversation `workspace_id`; BFF must add browser session ID |
+| agent writes into another session's files | shared workspace | keep the hex session id as `workspace_id`; BFF creates the dir and rejects non-hex ids |
 | mid-stream provider death | tokens already sent | not recoverable by LiteLLM; future BFF marks `partial` and retries from checkpoint |
 | CLI model fails and falls back unexpectedly | bad/expired login | check `sessions.sh`, staged credentials, or run `scripts/login.sh` |
 | `check.sh` says key EMPTY | wrong key name in `gateway.env` | consult §5.2 mapping |
@@ -702,10 +773,10 @@ Additional caveats:
 
 - [x] Phase 0 — secrets, safety, working gateway
 - [x] Phase 1 — provider registry, Muse/AGY wiring, heavy/light chains
-- [ ] Phase 2 — continuity: session journal, durable jobs, browser-session-scoped workspaces
-- [ ] Phase 3 — BFF: auth, mode mapping, budget
-- [ ] Phase 4 — static frontend
-- [ ] Phase 5 — nginx exposure at `t.aryan.cfd/agentcyto`
+- [x] Phase 2 — continuity: session journal, durable jobs, browser-session-scoped workspaces
+- [x] Phase 3 — BFF: auth, mode mapping, budget (rate limiting still backlog)
+- [x] Phase 4 — static frontend
+- [x] Phase 5 — nginx exposure at `t.aryan.cfd/agentcyto`
 - [ ] Phase 6 — ops, backups, drills
 
 When implementing a later phase, update this file in the same change: new services, ports, env keys, routes, data stores, and verification commands belong here.
@@ -731,19 +802,27 @@ gateway.env:               LITELLM_MASTER_KEY, NVIDIA_NIM_API_KEY,
 GET  http://127.0.0.1:4000/health/liveliness
 POST http://127.0.0.1:4000/v1/chat/completions
 GET  http://127.0.0.1:4000/v1/models
-GET  https://t.aryan.cfd/agentcyto/api/health        (planned)
+GET  http://127.0.0.1:8890/api/health                 (BFF, needs X-Auth-User)
+POST http://127.0.0.1:8890/api/chat                   (durable job)
+GET  http://127.0.0.1:8890/api/stream?job_id=…&after=0  (SSE replay)
+GET  https://t.aryan.cfd/agentcyto/api/health        (live, basic auth)
 ```
 
 ### Critical file paths
 
 ```
 /home/ubuntu/cyto/agentcyto/.env
-/home/ubuntu/cyto/agentcyto/workspaces/<conversation-id>/
+/home/ubuntu/cyto/agentcyto/workspaces/<hex-session-id>/
+/home/ubuntu/cyto/agentcyto/agentcyto/bff/app.py
+/home/ubuntu/cyto/agentcyto/agentcyto/bff/modes.yaml
+/home/ubuntu/cyto/agentcyto/agentcyto/state/agentcyto.db
+/home/ubuntu/cyto/agentcyto/agentcyto/ui/
 /home/ubuntu/cyto/agentcyto/cli-gateway/secrets/gateway.env
 /home/ubuntu/cyto/agentcyto/cli-gateway/secrets/cli-state/
 /home/ubuntu/cyto/agentcyto/cli-gateway/gateway/config.yaml
 /home/ubuntu/cyto/agentcyto/cli-gateway/gateway/cli_provider.py
-/etc/nginx/sites-available/t.aryan.cfd               (pending edits)
+/etc/nginx/sites-available/t.aryan.cfd               (route live)
+/etc/nginx/.htpasswd-agentcyto                       (generated from AUTHKEY)
 ```
 
 ### One-line health check

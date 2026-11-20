@@ -53,6 +53,12 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 AGY_BIN = os.environ.get("AGY_BIN", "agy")
 MUSE_BIN = os.environ.get("MUSE_BIN", "muse")
 
+# Browser sessions injected by the BFF as an upstream request header. LiteLLM
+# exposes inbound headers under litellm_params.metadata.headers for custom
+# providers (verified on 1.110.1); the top-level `headers` kwarg is empty.
+SESSION_HEADER = "x-agentcyto-session"
+SESSION_RE = re.compile(r"^[0-9a-fA-F]{16,64}$")
+
 # Linux caps one argv string at 128 KiB; bigger prompts go through stdin.
 ARGV_PROMPT_LIMIT = 100_000
 SYSTEM_PROMPT_LIMIT = 60_000
@@ -134,8 +140,33 @@ def split_messages(messages: list[dict]) -> tuple[str, list[tuple[str, str]]]:
     return system.strip(), convo
 
 
-def history_key(spec: Spec, convo: list[tuple[str, str]]) -> str:
-    blob = json.dumps([spec.scope, convo], ensure_ascii=False, separators=(",", ":"))
+def browser_session(kwargs: dict) -> str | None:
+    """Extract and validate the BFF's session id from LiteLLM handler kwargs.
+
+    Returns None for OpenCode/direct callers (backward compatible). Invalid
+    values are ignored rather than rejected: they must never reach a path or a
+    session hash.
+    """
+    lp = kwargs.get("litellm_params") or {}
+    sources = [kwargs.get("headers"), kwargs.get("metadata"), lp.get("metadata"),
+               lp.get("litellm_metadata")]
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        headers = src.get("headers") if src.get("headers") is not None else src
+        if not isinstance(headers, dict):
+            continue
+        value = headers.get(SESSION_HEADER) or headers.get("X-Agentcyto-Session")
+        if isinstance(value, str) and SESSION_RE.fullmatch(value):
+            return value
+    return None
+
+
+def history_key(spec: Spec, convo: list[tuple[str, str]], session: str | None = None) -> str:
+    # Session is part of the hash: two browser sessions with identical text can
+    # never resume each other's native CLI session. Absent session keeps the
+    # original key so OpenCode's existing conversations keep working.
+    blob = json.dumps([session or "", spec.scope, convo], ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -442,17 +473,22 @@ async def run_cli(spec: Spec, prompt: str, system: str, session_id: str | None,
 # Turn orchestration
 # --------------------------------------------------------------------------- #
 
-async def run_turn(model: str, messages: list[dict]) -> AsyncIterator[str | Result]:
+async def run_turn(model: str, messages: list[dict], session: str | None = None) -> AsyncIterator[str | Result]:
     spec = parse_model(model)
     system, convo = split_messages(messages)
     history, latest = convo[:-1], convo[-1][1]
 
-    session_id = store().get(history_key(spec, history)) if history else None
-    # Stable, per-conversation workspace for agent models. Derived from the first
-    # user message so later turns land in the same directory without extra headers.
-    workspace_id = hashlib.sha256(
-        json.dumps([spec.scope, convo[0][1]], ensure_ascii=False).encode()
-    ).hexdigest()[:16] if spec.agent else None
+    session_id = store().get(history_key(spec, history, session)) if history else None
+    # Per-conversation workspace for agent models. The BFF supplies a validated
+    # browser session id; without one (OpenCode/direct calls) keep the legacy
+    # hash of the first user message so existing workspaces stay stable.
+    if spec.agent:
+        workspace_id = session or hashlib.sha256(
+            json.dumps([spec.scope, convo[0][1]], ensure_ascii=False).encode()
+        ).hexdigest()[:16]
+    else:
+        workspace_id = None
+    store_scope = f"{session}|{spec.scope}" if session else spec.scope
     if session_id:
         prompt = latest
     elif history:
@@ -483,7 +519,7 @@ async def run_turn(model: str, messages: list[dict]) -> AsyncIterator[str | Resu
         raise CustomLLMError(status_code=_status_for(final.error), message=f"{spec.tool}: {final.error}")
     if final.session_id:
         done = convo + [("assistant", final.text.strip())]
-        store().put(history_key(spec, done), spec.scope, final.session_id, len(done))
+        store().put(history_key(spec, done, session), store_scope, final.session_id, len(done))
     yield final
 
 
@@ -521,13 +557,14 @@ class CLIProvider(CustomLLM):
 
     def completion(self, model, messages, api_base, custom_prompt_dict, model_response, print_verbose,
                    encoding, api_key, logging_obj, optional_params, *args, **kwargs) -> ModelResponse:
-        items = _run_sync(lambda: run_turn(model, messages))
+        items = _run_sync(lambda: run_turn(model, messages, browser_session(kwargs)))
         return self._fill(model_response, model, items[-1])
 
     async def acompletion(self, model, messages, api_base, custom_prompt_dict, model_response, print_verbose,
                           encoding, api_key, logging_obj, optional_params, *args, **kwargs) -> ModelResponse:
+        session = browser_session(kwargs)
         final = None
-        async for item in run_turn(model, messages):
+        async for item in run_turn(model, messages, session):
             if isinstance(item, Result):
                 final = item
         return self._fill(model_response, model, final)
@@ -535,8 +572,9 @@ class CLIProvider(CustomLLM):
     async def astreaming(self, model, messages, api_base, custom_prompt_dict, model_response, print_verbose,
                          encoding, api_key, logging_obj, optional_params, *args, **kwargs
                          ) -> AsyncIterator[GenericStreamingChunk]:
+        session = browser_session(kwargs)
         sent = False
-        async for item in run_turn(model, messages):
+        async for item in run_turn(model, messages, session):
             if isinstance(item, Result):
                 tail = "" if sent else item.text  # agy (or old claude) never streamed: send it all now
                 yield GenericStreamingChunk(
@@ -556,7 +594,7 @@ class CLIProvider(CustomLLM):
     def streaming(self, model, messages, api_base, custom_prompt_dict, model_response, print_verbose,
                   encoding, api_key, logging_obj, optional_params, *args, **kwargs
                   ) -> Iterator[GenericStreamingChunk]:
-        res = _run_sync(lambda: run_turn(model, messages))[-1]
+        res = _run_sync(lambda: run_turn(model, messages, browser_session(kwargs)))[-1]
         yield GenericStreamingChunk(
             text=res.text, tool_use=None, is_finished=True, finish_reason="stop", index=0,
             usage={"prompt_tokens": res.prompt_tokens, "completion_tokens": res.completion_tokens,

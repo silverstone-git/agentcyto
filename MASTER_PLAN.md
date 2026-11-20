@@ -1,9 +1,9 @@
 # MASTER_PLAN — agentcyto
 
-Status: **Phase 0 + 1 complete locally; Phases 2–6 pending**
+Status: **Phases 0–5 shipped locally; Phase 6 (ops/backups) pending**
 Updated: 2026-11-20
 
-**Progress:** `secrets/gateway.env` staged from root `./.env`; CLI logins staged into `secrets/cli-state/`; image builds; gateway healthy; Muse, all three agent models, and `heavy`/`light` aliases pass smoke tests. NIM ID drift fixed, Gemini alt key wired, contributor models enabled. Not yet done: BFF, frontend, nginx route, backups.
+**Progress:** gateway healthy; BFF on `127.0.0.1:8890` with durable jobs, SSE replay and per-session isolation; static UI served by the BFF; nginx basic-auth route live at `https://t.aryan.cfd/agentcyto/`. Still open: provider fallback/quota drills, workspace size cap + TTL, rate limiting, real-browser reconnect test, backups/monitoring. `certbot renew --dry-run` passed.
 Scope: turn `cli-gateway/` into a resilient, ordered, multi-provider chat/agent service with a static web UI, exposed at `https://t.aryan.cfd/agentcyto/` behind nginx password auth.
 
 ---
@@ -166,9 +166,11 @@ Why mode aliases live in LiteLLM: ordering stays in one place, works with OpenCo
 
 **Exit criteria:** `scripts/smoke.sh heavy light` shows distinct responders; `muse-cli`/`muse-agent` answer through the gateway; invalidating one Gemini key advances to the alt key.
 
-### Phase 2 — Continuity and per-session agent workspaces
+### Phase 2 — Continuity and per-session agent workspaces ✅ shipped
 
-**Files:** `cli-gateway/gateway/cli_provider.py` (patch), new `agentcyto/bff/*`
+**Files:** `cli-gateway/gateway/cli_provider.py` (patched), `agentcyto/bff/{app.py,db.py,modes.yaml,Dockerfile,requirements.txt}`, `agentcyto/state/`
+
+**Shipped deviation:** the BFF creates and owns the workspace directories directly (hex session ID, 0700, traversal-proof allow-list); the gateway continues to use the supplied ID as `cwd` for agent specs. Workspace size cap and TTL cleanup remain backlog items.
 
 1. Add `X-Agentcyto-Session` to `Spec.scope`/`history_key()` so two browser sessions cannot share CLI sessions. For Muse, use the same UUID as `--session-id`; for AGY/Claude keep their native session IDs in the existing map, keyed by browser session.
 2. BFF SQLite (`agentcyto/state/agentcyto.db`): `sessions`, `messages`, `jobs`, `job_events`, `usage`, `health`.
@@ -178,9 +180,9 @@ Why mode aliases live in LiteLLM: ordering stays in one place, works with OpenCo
 
 **Exit criteria:** tab closed mid-answer → reconnect continues; container restart → jobs/history survive; two sessions with identical text get different CLI sessions and different workspace dirs; an agent cannot read another session's workspace.
 
-### Phase 3 — BFF: auth, mode mapping, budget
+### Phase 3 — BFF: auth, mode mapping, budget ✅ shipped (rate limiting deferred)
 
-**Files:** new `agentcyto/bff/{app.py,modes.yaml,Dockerfile}`, `cli-gateway/docker-compose.yml`
+**Files:** `agentcyto/bff/{app.py,db.py,modes.yaml,Dockerfile}`, `cli-gateway/docker-compose.yml`
 
 1. FastAPI + uvicorn + httpx on `127.0.0.1:8890`, `env_file: secrets/gateway.env`, volumes for `agentcyto/state` and `/workspaces`; `restart: unless-stopped`.
 2. Inject `Authorization: Bearer $LITELLM_MASTER_KEY` upstream. Require nginx's `X-Auth-User` header when behind nginx. `AUTHKEY` is the single dashboard password (nginx basic auth); no second credential store.
@@ -190,9 +192,11 @@ Why mode aliases live in LiteLLM: ordering stays in one place, works with OpenCo
 
 **Exit criteria:** master key appears in no response/JS bundle; direct external access to port 8890 impossible; exceeding the cap downgrades heavy rather than failing.
 
-### Phase 4 — Static frontend at `/agentcyto/`
+### Phase 4 — Static frontend at `/agentcyto/` ✅ shipped
 
-**Files:** new `agentcyto/ui/` (plain HTML/CSS/JS, no build step)
+**Files:** `agentcyto/ui/` (plain HTML/CSS/JS, no build step)
+
+**Shipped deviation:** the BFF serves the static files itself (`StaticFiles` mounted at `/`) so nginx only needs one proxy location; no `/var/www/agentcyto` alias is used.
 
 1. Chat: SSE streaming, heavy/light toggle, chat/agent selector, "answered by `<model>`" badge, stop/retry/regenerate, session picker, agent workspace indicator (session id + "files live here").
 2. Status: provider health, current chain heads, responder history, daily usage/budget.
@@ -201,9 +205,9 @@ Why mode aliases live in LiteLLM: ordering stays in one place, works with OpenCo
 
 **Exit criteria:** page loads at `https://t.aryan.cfd/agentcyto/`, assets load, mode switch changes responder, agent mode works within its session workspace.
 
-### Phase 5 — nginx exposure
+### Phase 5 — nginx exposure ✅ shipped
 
-**Files:** `/etc/nginx/sites-available/t.aryan.cfd`, `/etc/nginx/.htpasswd-agentcyto`, `agentcyto/scripts/deploy.sh`
+**Files:** `/etc/nginx/sites-available/t.aryan.cfd` (backup `.bak-agentcyto`), `/etc/nginx/.htpasswd-agentcyto`, `agentcyto/scripts/deploy.sh`
 
 1. `apt-get install -y apache2-utils` (`htpasswd` is not installed). Generate the password file from `AUTHKEY` without echoing it:
    `printf '%s' "$AUTHKEY" | htpasswd -i -c /etc/nginx/.htpasswd-agentcyto agentcyto` then `chmod 640` / group `www-data`.
@@ -272,13 +276,13 @@ Remaining:
 - [x] `docker compose build gateway` succeeds; `check.sh` and `smoke.sh` pass. (NIM model id drift fixed.)
 - [x] `muse-cli` and `muse-agent` answer through the gateway; Muse JSONL output parsed without leaking session logs.
 - [x] `claude-agent`, `agy-agent`, `muse-agent` each work in a distinct `/workspaces/<conversation>/` (3 distinct dirs observed).
-- [ ] `curl -u agentcyto:"$AUTHKEY" https://t.aryan.cfd/agentcyto/api/health` → 200; without `-u` → 401.
+- [x] `curl -u agentcyto:"$AUTHKEY" https://t.aryan.cfd/agentcyto/api/health` → 200; without `-u` → 401.
 - [ ] `heavy` and `light` produce different responders; reported `model` matches the chain head.
 - [ ] Invalidating a Gemini key advances to the alt key; chain recovers after cooldown.
-- [ ] Browser disconnect mid-stream → reconnect resumes from checkpoint; no duplicated final message.
-- [ ] Gateway/BFF restart → sessions, jobs, and CLI session maps survive.
-- [ ] `/p/`, `/admin`, `/cytogame/` still work; Certbot renewal dry-run passes.
-- [ ] No secret value in tracked files, browser devtools, or logs.
+- [~] Browser disconnect mid-stream → reconnect resumes from checkpoint; no duplicated final message (BFF restart path verified: attempt 2, one final message).
+- [x] Gateway/BFF restart → sessions, jobs, and CLI session maps survive.
+- [~] `/p/` and `/cytogame/` still 200; `/admin` not re-tested; Certbot renewal dry-run passed.
+- [x] No secret value in tracked files, browser devtools, or logs.
 
 ---
 

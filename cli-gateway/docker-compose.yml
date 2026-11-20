@@ -46,6 +46,42 @@ services:
       retries: 3
       start_period: 40s
 
+  # Backend-for-frontend: auth boundary, durable jobs and SSE replay.
+  # The master key arrives via env_file and is never exposed to the browser.
+  bff:
+    build:
+      context: ../agentcyto
+      dockerfile: bff/Dockerfile
+      args:
+        APP_UID: ${APP_UID:-1001}
+    image: agentcyto-bff:local
+    env_file:
+      - path: secrets/gateway.env
+        required: true
+    environment:
+      GATEWAY_URL: http://gateway:4000
+      CLI_WORKSPACE_DIR: /workspaces
+      AGENCYTO_DB: /state/agentcyto.db
+      GATEWAY_SESSION_DB: /gateway-state/sessions.db
+      REQUIRE_AUTH_HEADER: ${REQUIRE_AUTH_HEADER:-1}
+      AGENCYTO_DAILY_BUDGET_USD: ${AGENCYTO_DAILY_BUDGET_USD:-}
+    volumes:
+      - ../agentcyto/state:/state
+      - gateway-state:/gateway-state
+      - ${WORKSPACE_DIR:-./workspace}:/workspaces
+    ports:
+      - "127.0.0.1:${BFF_PORT:-8890}:8000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=10).status==200 else 1)"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+
   # On-demand tool container: logins, key checks, smoke tests.
   #   docker compose run --rm cli <command>
   cli:

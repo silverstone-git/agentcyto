@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agentcyto</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="brand">agentcyto <span class="tag">multi-provider chat &amp; agents</span></div>
+    <nav>
+      <button id="tab-chat" class="tab active">Chat</button>
+      <button id="tab-status" class="tab">Status</button>
+    </nav>
+  </header>
+
+  <main id="view-chat">
+    <aside class="sidebar">
+      <button id="new-session" class="primary">+ New chat</button>
+      <div class="section-label">Sessions</div>
+      <div id="session-list" class="session-list"></div>
+      <div class="sidebar-footer">
+        <button id="rename-session" class="ghost">Rename</button>
+        <button id="clear-session" class="ghost danger">Clear</button>
+      </div>
+    </aside>
+
+    <section class="chat-panel">
+      <div class="toolbar">
+        <label>Mode
+          <select id="mode"></select>
+        </label>
+        <label>Role
+          <select id="role">
+            <option value="chat">Chat</option>
+            <option value="agent">Agent</option>
+          </select>
+        </label>
+        <label>Model
+          <select id="model"><option value="">auto (mode default)</option></select>
+        </label>
+        <span id="workspace-badge" class="workspace-badge" hidden></span>
+      </div>
+
+      <div id="messages" class="messages">
+        <div class="empty">Start a conversation. Pick <b>Agent</b> to give the model a private workspace.</div>
+      </div>
+
+      <div id="job-status" class="job-status" hidden></div>
+
+      <form id="composer" class="composer">
+        <textarea id="input" rows="3" placeholder="Message agentcyto…" required></textarea>
+        <div class="composer-actions">
+          <button id="send" class="primary" type="submit">Send</button>
+          <button id="stop" class="ghost" type="button" hidden>Stop</button>
+          <button id="retry" class="ghost" type="button" hidden>Retry</button>
+          <span class="hint">Enter to send · Shift+Enter for newline</span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <main id="view-status" hidden>
+    <section class="status-card">
+      <h2>Service health</h2>
+      <div id="health" class="status-grid">checking…</div>
+    </section>
+    <section class="status-card">
+      <h2>Daily usage</h2>
+      <div id="usage" class="status-grid">checking…</div>
+      <div class="bar"><div id="usage-bar"></div></div>
+    </section>
+    <section class="status-card">
+      <h2>Modes &amp; chains</h2>
+      <div id="mode-info" class="status-grid"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

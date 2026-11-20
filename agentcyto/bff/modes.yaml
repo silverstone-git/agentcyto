@@ -1,0 +1,74 @@
+# Mode → LiteLLM alias mapping. Editable without rebuilding the BFF image;
+# POST /api/admin/reload picks up changes at runtime.
+#
+# `chat` modes use the ordered fallback chains configured in the gateway.
+# `agent` models are explicit choices: no automatic cross-model fallback, so a
+# half-finished edit is never handed to a different agent.
+
+default_mode: heavy
+daily_budget_usd: 5.00
+allow_paid: true
+request_timeout_seconds: 900
+
+modes:
+  heavy:
+    label: Heavy
+    chat: heavy
+    agent: claude-agent
+    paid: true
+    description: Quality first; paid and quota-backed models allowed.
+  heavy-tool:
+    label: Heavy (tools)
+    chat: heavy-tool
+    agent: claude-agent
+    paid: true
+    description: Tool-capable prefix of the heavy chain.
+  light:
+    label: Light
+    chat: light
+    agent: muse-agent
+    paid: false
+    description: Fast and free-first.
+  light-tool:
+    label: Light (tools)
+    chat: light-tool
+    agent: muse-agent
+    paid: false
+    description: Tool-capable prefix of the light chain.
+
+# Explicit model overrides accepted from /api/chat (`model` field).
+chat_models:
+  - heavy
+  - heavy-tool
+  - light
+  - light-tool
+  - nemotron-super
+  - nemotron-ultra
+  - nemotron-lightning
+  - nemotron-bolt
+  - gemini-flash
+  - gemini-flash-lite
+  - muse-spark
+  - muse-spark-cheap
+  - claude-cli
+  - claude-cli-opus
+  - agy-cli
+  - muse-cli
+
+agent_models:
+  - claude-agent
+  - agy-agent
+  - muse-agent
+  - muse-agent-contributor
+
+# Rough per-1M-token estimates used only for the shared daily cap and the
+# dashboard. They are deliberately conservative; they are not billing data.
+# Missing models default to zero (free tier / subscription).
+price_usd_per_million:
+  muse-spark: 3.00
+  muse-spark-cheap: 0.30
+  claude-cli-opus: 15.00
+  claude-cli: 3.00
+  claude-agent: 15.00
+  gemini-flash: 0.30
+  gemini-flash-lite: 0.10
