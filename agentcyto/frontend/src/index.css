@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+@theme {
+  --brand-50: #f0f9ff;
+  --brand-100: #e0f2fe;
+  --brand-500: #0a84ff;
+  --brand-600: #0066cc;
+  --brand-900: #073b6e;
+
+  --ink-0: #ffffff;
+  --ink-50: #f2f2f7;
+  --ink-100: #e5e5ea;
+  --ink-200: #d1d1d6;
+  --ink-300: #c7c7cc;
+  --ink-400: #aeb1b9;
+  --ink-500: #8e8e93;
+  --ink-600: #636366;
+  --ink-700: #48484a;
+  --ink-800: #3a3a3c;
+  --ink-900: #2c2c2e;
+  --ink-950: #1c1c1e;
+  --ink-1000: #0a0a0b;
+
+  --surface-base: #0a0a0b;
+  --surface-elevated: #17171a;
+  --surface-card: #1c1c1e;
+  --surface-border: #2c2c2e;
+
+  --success: #30d158;
+  --warn: #ffd60a;
+  --danger: #ff453a;
+
+  --radius-xl: 16px;
+  --radius-2xl: 22px;
+  --radius-3xl: 28px;
+}
+
+html, body, #app, #root {
+  @apply bg-surface-base text-ink-50 antialiased selection:bg-brand-500 selection:text-white;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.glass {
+  background: rgba(23, 23, 26, 0.6);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(44, 44, 46, 0.5);
+}
+
+.card {
+  background: var(--surface-card);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-2xl);
+}
+
+.ink-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.ink-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ink-scroll::-webkit-scrollbar-thumb {
+  background: rgba(142, 142, 147, 0.25);
+  border-radius: 4px;
+}
+.ink-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(142, 142, 147, 0.4);
+}
+
+.typing-dot {
+  animation: typing 1.2s infinite ease-in-out both;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.slide-in {
+  animation: slideIn 0.3s ease-out both;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in {
+  animation: fadeIn 0.25s ease-out both;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

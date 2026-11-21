@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -662,7 +662,31 @@ async def kb_ingestion(ingestion_id: str):
     return ing
 
 
-# Static UI last so /api/* routes always win. nginx proxies /agentcyto/ here.
+# Static UI. Assets are served directly; all other non-API paths fall back to
+# index.html so client-side routing (React Router) works. nginx proxies /agentcyto/ here.
 UI_DIR = os.environ.get("AGENCYTO_UI", "/app/ui")
+UI_INDEX = os.path.join(UI_DIR, "index.html")
+
+
 if os.path.isdir(UI_DIR):
-    app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
+    app.mount("/assets", StaticFiles(directory=os.path.join(UI_DIR, "assets")), name="assets")
+
+
+@app.get("/favicon.svg")
+async def favicon():
+    return FileResponse(os.path.join(UI_DIR, "favicon.svg"))
+
+
+@app.get("/icons.svg")
+async def icons():
+    return FileResponse(os.path.join(UI_DIR, "icons.svg"))
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(request: Request, full_path: str):
+    """Serve index.html for any non-API path so client-side routing works."""
+    if full_path.startswith("api/"):
+        raise HTTPException(404, "Not Found")
+    if os.path.isfile(UI_INDEX):
+        return FileResponse(UI_INDEX)
+    raise HTTPException(404, "UI not built")
