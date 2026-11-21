@@ -31,7 +31,7 @@ Related documents:
 
 ## 1. Scope and current status
 
-**Date of this document:** 2026-11-20
+**Date of this document:** 2026-11-21
 
 **Completed locally (Phases 0–5 of `MASTER_PLAN.md`):**
 - Root `./.env` holds all provider keys; `cli-gateway/secrets/gateway.env` is generated from it.
@@ -39,14 +39,16 @@ Related documents:
 - Docker image builds cleanly; gateway is healthy on `127.0.0.1:4000`.
 - Muse Code support added to the custom provider; all four CLI families work (`claude`, `agy`, `muse`, plus agent variants).
 - Preference aliases `heavy`, `heavy-tool`, `light`, `light-tool` exist with ordered fallback chains.
-- BFF on `127.0.0.1:8890`: SQLite session/message/job journal, durable workers, SSE replay, usage/budget guard, static UI.
+- BFF on `127.0.0.1:8890`: SQLite session/message/job journal, durable workers, SSE replay, usage/budget guard, redesigned static UI (Apple-inspired dark theme, glassmorphism, detailed system log drawer, KB attach/detach on chat, separate password-gated admin page for KB ingestion).
 - `cli_provider.py` scopes CLI sessions and agent workspaces to a browser session via `X-Agentcyto-Session`.
 - nginx route `/agentcyto/` with basic auth is live on `https://t.aryan.cfd/agentcyto/`.
+- **Knowledge Base (KB)**: BFF extension backed by SQLite-only (`kb_*` tables) with FTS5 full-text search. Deterministic markdown ingestion pipeline (`kb.py`) compiles physics Markdown in `repo/physics/` into a structural node tree (document/chapter/section/subsection/paragraph/equation/theorem/proof/derivation) with typed edges, symbol inventories, equation/derivation/concept indexes, and provenance+confidence fields. KB API endpoints serve the web page; KB *editing* (ingest/reindex/clear/search) lives on a separate admin page gated by a password (`apple` for now); the chat page only shows available KB repos to attach/detach per conversation. `repo/physics/` mounted read-only into the BFF at `/kb-source`.
 - Git repository initialised with a baseline commit; no secret files tracked.
 
 **Not yet built (Phase 6 + open drills):**
 - Backups, monitoring, failover/fallback drills.
 - Workspace size cap + TTL, per-session/IP rate limiting.
+- KB LLM enrichment stage (summaries, concepts, derivation boundaries via gateway) — implemented but not yet wired into a scheduled job.
 - Real-browser reconnect test, Gemini alt-quota and Muse credit measurement (`certbot renew --dry-run` passed).
 
 ---
@@ -65,21 +67,23 @@ Related documents:
 │
 ├── agentcyto/                    # BFF + static UI (Phase 2–4)
 │   ├── bff/
-│   │   ├── app.py                # FastAPI routes, job worker, SSE, auth boundary
-│   │   ├── db.py                 # SQLite schema + helpers, gateway session-map cleanup
+│   │   ├── app.py                # FastAPI routes, job worker, SSE, auth boundary + KB API
+│   │   ├── db.py                 # SQLite schema + helpers, gateway session-map cleanup + KB tables
+│   │   ├── kb.py                 # KB ingestion pipeline: markdown parser, LaTeX/symbol/equation extraction, FTS5 index
 │   │   ├── modes.yaml            # mode → alias mapping, budget, price estimates
 │   │   ├── requirements.txt
 │   │   └── Dockerfile            # uid 1001, serves UI from /app/ui
 │   ├── state/
 │   │   ├── .keep
-│   │   └── agentcyto.db          # git-ignored, WAL mode
+│   │   └── agentcyto.db          # git-ignored, WAL mode (includes kb_* tables)
 │   ├── ui/
-│   │   ├── index.html
-│   │   ├── app.js
-│   │   └── styles.css
+│   │   ├── index.html            # static UI incl. KB tab
+│   │   ├── app.js                # UI logic incl. KB API wiring
+│   │   └── styles.css            # UI styles incl. KB styling
 │   └── scripts/
 │       └── deploy.sh             # htpasswd + nginx test/reload
 │
+├── repo/physics/                 # KB source of truth: 13 physics Markdown files (~26MB), read-only
 └── cli-gateway/
     ├── .env                      # non-secret Compose settings (APP_UID, WORKSPACE_DIR, timeouts…)
     ├── .env.example              # template
@@ -195,7 +199,7 @@ CLI versions:
 | `claude` | 2.1.328 | 2.1.329 | installed from `https://claude.ai/install.sh` |
 | `agy` | 1.5.13 | 1.5.13 | installed from `https://antigravity.google/cli/install.sh`; free tier |
 | `muse` | 1.4.24-R9131.1 | same (launcher + downloaded binary) | Meta Muse Code |
-| `brev` | v0.6.337 | not installed | GPU instance manager, **not** an LLM provider; see §15 |
+| `brev` | v0.6.337 | not installed | GPU instance manager, **not** an LLM provider; see §16 |
 
 LiteLLM version: pinned `1.110.1` (`litellm[proxy]`).
 
@@ -257,7 +261,7 @@ All state lives under `cli-gateway/secrets/cli-state/` (git-ignored, mode 700 di
 | Service | Purpose | Network | Notes |
 |---|---|---|---|
 | `gateway` | long-running LiteLLM proxy | `127.0.0.1:4000` | `restart: unless-stopped`, healthcheck every 30 s, `mem_limit: 2g` |
-| `bff` | FastAPI BFF + static UI | `127.0.0.1:8890` | `restart: unless-stopped`, healthcheck, uid 1001, mounts `../agentcyto/state:/state`, `gateway-state:/gateway-state`, workspaces |
+| `bff` | FastAPI BFF + static UI | `127.0.0.1:8890` | `restart: unless-stopped`, healthcheck, uid 1001, mounts `../agentcyto/state:/state`, `gateway-state:/gateway-state`, workspaces, plus `../../repo/physics:/kb-source:ro` (KB source of truth) |
 | `cli` | on-demand tool container | none (profile `tools`) | same image/env/volumes; used for `check.sh`, `smoke.sh`, `sessions.sh`, logins |
 
 Shared environment anchor `x-gateway-env`:
@@ -491,11 +495,108 @@ These codes are what LiteLLM's router uses for fallback decisions.
 
 ---
 
-## 9. Data stores
+## 9. Knowledge Base (KB)
+
+The KB is a BFF extension that compiles the physics Markdown sources in `repo/physics/` into a
+queryable mathematical knowledge base, all inside SQLite (no vector/graph DB). It gives full
+ingestion/search control from the web page.
+
+### 9.1 Design principles
+
+- **No user uploads.** Ingestion is admin-controlled from the KB tab in the static UI. The source
+  Markdown files are never modified; they are mounted read-only into the BFF at `/kb-source`.
+- **SQLite-only.** All derived data lives in `kb_*` tables in `agentcyto/state/agentcyto.db`
+  (WAL mode). Full-text search uses SQLite FTS5 (`kb_node_fts`).
+- **Three provenance categories preserved independently:** source facts, extracted structure,
+  inferred knowledge — each node carries `provenance` (`extracted`/`inferred`) and `confidence`
+  (0–1) fields.
+- **Idempotent.** Re-ingestion skips files whose SHA-256 is unchanged; `force=true` rebuilds from
+  scratch.
+- **Structural compiler pattern.** Documents compile into a tree of
+  `document → chapter → section → subsection → paragraph` plus first-class `equation`,
+  `theorem`, `proof`, `definition`, `example`, `derivation` nodes with typed edges
+  (`contains`, `references`, `defines`, `uses_symbol`, `follows_step`, `derived_from`, `part_of`).
+
+### 9.2 KB tables (in `agentcyto/bff/db.py`)
+
+| Table | Contents |
+|---|---|
+| `kb_documents` | one row per ingested `.md` (id, path, hash, size, status, node/equation counts) |
+| `kb_nodes` | structural nodes (id, document_id, type, title, content, latex, label, line range, parent, ordinal, provenance, confidence) |
+| `kb_node_edges` | typed edges between nodes (source_id, target_id, rel_type, properties JSON) |
+| `kb_symbols` | symbol inventory per document (symbol, normalized, meaning context) |
+| `kb_symbol_occurrences` | where each symbol appears (node, line range, context) |
+| `kb_concepts` | named concepts (symbols, section IDs JSON) |
+| `kb_derivations` | derivation records (assumptions JSON) |
+| `kb_derivation_steps` | ordered steps within a derivation |
+| `kb_references` | equation/section/theorem references extracted from text |
+| `kb_node_fts` | FTS5 virtual table over node content + title (bm25 ranking) |
+| `kb_ingestions` | ingestion run log (status, files_found/ingested/skipped, nodes_created, timestamps) |
+
+### 9.3 KB API endpoints (all require `X-Auth-User`)
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/kb/status` | GET | source dir, file/doc/node/equation/symbol counts, latest ingestion |
+| `/api/kb/ingest` | POST | ingest all `.md` files (idempotent, runs in background) |
+| `/api/kb/reindex` | POST | wipe all KB data and re-ingest from scratch |
+| `/api/kb/clear` | DELETE | delete all KB data |
+| `/api/kb/documents` | GET | list ingested documents |
+| `/api/kb/documents/{id}` | GET | document + node tree |
+| `/api/kb/documents/{id}` | DELETE | remove a document and all derived rows |
+| `/api/kb/search` | GET | FTS5 full-text search (`q`, optional `type`/`doc`/`limit`) |
+| `/api/kb/nodes/{id}` | GET | node + children + edges + document |
+| `/api/kb/equations` | GET | list equation nodes (optional `doc`) |
+| `/api/kb/symbols` | GET | list symbols with occurrence counts (optional `doc`) |
+| `/api/kb/symbols/{id}/occurrences` | GET | where a symbol appears |
+| `/api/kb/derivations` | GET | list derivations with steps |
+| `/api/kb/concepts` | GET | list concepts |
+| `/api/kb/stats` | GET | node counts by type |
+| `/api/kb/enrich` | POST | LLM section summaries via gateway (optional enrichment) |
+| `/api/kb/ingestions` | GET | ingestion run history |
+| `/api/kb/ingestions/{id}` | GET | single ingestion run details |
+
+### 9.4 KB UI (static frontend)
+
+The UI is split into two areas so KB *editing* can never happen accidentally from the chat page:
+
+- **Chat page** (`index.html`/`app.js`/`styles.css`): shows the list of ingested KB repos as attachable/detachable chips per conversation. Each repo lists its node/equation counts. Attaching adds `kb_docs` to the chat job so the model can use that KB context. No ingest/reindex/clear controls here.
+- **Admin page** (password-gated, soft password `apple` for now): contains all KB editing controls — Ingest / Update, Rebuild from scratch, Clear all KB data — plus live counts, document list, and full-text search.
+
+Shared UI traits:
+- Apple-inspired dark theme, glassmorphic header, large rounded corners, vibrant accent (`#0a84ff`), smooth motion.
+- Detailed system log drawer at the bottom of the chat showing every step (queue, job start, stream attempt, completion with model/attempt/KB-repo count/duration, errors).
+- Chat messages show a meta row: answered-by model, attempt, KB repo count, duration, timestamp.
+
+The KB tab (`index.html`/`app.js`/`styles.css`) provides:
+- Live counts: source files, documents, nodes, equations, symbols
+- Document list with node counts and equation counts
+- Full-text search with type and document filters, result previews
+
+### 9.5 Container & env changes
+
+- `cli-gateway/docker-compose.yml`: mounts `../repo/physics:/kb-source:ro` into the `bff` service
+  and sets `KB_SOURCE_DIR=/kb-source`.
+- `agentcyto/bff/Dockerfile`: copies `kb.py` into the image.
+- `agentcyto/bff/requirements.txt`: no new dependencies (uses built-in `re` + existing `httpx`).
+
+### 9.6 Verified results
+
+Ingesting all 13 physics Markdown files (~26 MB) yields:
+- 13 documents, 78,551 nodes, 1,320 equations, 1,278 symbols
+- Node types: paragraph (72,527), subsection (2,496), equation (1,320), section (1,042),
+  subsubsection (857), chapter (155), example (153), theorem (1)
+- Re-ingestion skips all 13 unchanged files (counts stable)
+- All endpoints return 200; `check.sh` and `smoke.sh` unaffected
+
+---
+
+## 10. Data stores
 
 | Store | Location | Contents | Notes |
 |---|---|---|---|
 | CLI session map | `gateway-state:/state/sessions.db` | hash → native session id | survives container restarts; clear via `scripts/sessions.sh clear` |
+| KB tables | `agentcyto/state/agentcyto.db` → `/state` in `bff` | `kb_*` tables incl. FTS5 | survives BFF restarts; git-ignored |
 | Muse session logs | `/home/app/.config/muse` (host `secrets/cli-state/muse`) | Muse sessions, settings, trust | do not delete if resume is needed |
 | Claude auth/session | `/home/app/.claude` | OAuth credentials, projects, history | only essential files staged from host; container grows its own `projects/` |
 | AGY state | `/home/app/.gemini`, `~/.config/antigravity`, `~/.cache/antigravity` | OAuth, conversations, history | multiple dirs required |
@@ -638,6 +739,7 @@ docker compose --project-directory cli-gateway config --quiet
 bash cli-gateway/scripts/check.sh
 bash cli-gateway/scripts/smoke.sh heavy light muse-cli muse-agent claude-agent agy-agent
 curl -fsS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/health >/dev/null
+curl -fsS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/status >/dev/null
 ```
 
 Expected smoke results from the current build:
@@ -650,11 +752,28 @@ heavy         OK  ~3s   via heavy
 light         OK  ~2s   via light
 ```
 
+Expected KB status after a full ingestion:
+```
+{"source_dir":"/kb-source","source_dir_exists":true,"source_files":13,
+ "documents":13,"total_nodes":78551,"total_equations":1320,"total_symbols":1278,...}
+```
+
 Also confirm workspace isolation after agent tests:
 ```sh
 find workspaces -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
 ```
 Three different agent smoke tests should produce three different IDs.
+
+KB-specific verification:
+```sh
+# KB endpoints all require X-Auth-User and return 200 after ingestion
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/status
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/documents
+curl -sS -H 'X-Auth-User: local' "http://127.0.0.1:8890/api/kb/search?q=equation&limit=5"
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/equations?limit=3
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/symbols?limit=5
+curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/stats
+```
 
 ---
 
@@ -721,6 +840,15 @@ If a secret is ever exposed in chat or logs, rotate it immediately at the provid
 3. Verify `GET /api/modes` and run one chat per changed mode.
 4. BFF code/static UI changes require `docker compose --project-directory cli-gateway build bff && up -d bff`; DB schema changes require a migration (the current `CREATE TABLE IF NOT EXISTS` does not alter existing tables).
 
+### 13.7 Re-ingest or rebuild the KB
+
+1. `POST /api/kb/ingest` with `X-Auth-User` — ingests all `.md` files in `KB_SOURCE_DIR`; skips files whose SHA-256 is unchanged (idempotent).
+2. `POST /api/kb/reindex` — wipes all KB data and re-ingests from scratch (use after parser/schema changes).
+3. `DELETE /api/kb/clear` — removes all KB data.
+4. `GET /api/kb/status` — confirm `files_ingested`/`files_skipped` and stable node counts.
+5. After any `db.py` KB schema change, existing tables are not altered (`CREATE TABLE IF NOT EXISTS`); drop `kb_*` tables manually or run reindex if needed.
+6. Rebuild BFF image if `kb.py` or parser regexes change: `docker compose --project-directory cli-gateway build bff && up -d --force-recreate bff`.
+
 ---
 
 ## 14. Deployment topology (live, see MASTER_PLAN Phases 2–5)
@@ -782,9 +910,11 @@ Additional caveats:
 - [x] Phase 1 — provider registry, Muse/AGY wiring, heavy/light chains
 - [x] Phase 2 — continuity: session journal, durable jobs, browser-session-scoped workspaces
 - [x] Phase 3 — BFF: auth, mode mapping, budget (rate limiting still backlog)
-- [x] Phase 4 — static frontend
+- [x] Phase 4 — static frontend (+ Knowledge Base tab: ingestion, search, document tree)
 - [x] Phase 5 — nginx exposure at `t.aryan.cfd/agentcyto`
 - [ ] Phase 6 — ops, backups, drills
+
+**Knowledge Base (complete):** SQLite-only KB with FTS5 search over `repo/physics/` (13 docs, 78,551 nodes, 1,320 equations, 1,278 symbols). Full web-page control via KB API endpoints and KB tab. LLM enrichment stage implemented but not yet scheduled.
 
 When implementing a later phase, update this file in the same change: new services, ports, env keys, routes, data stores, and verification commands belong here.
 
@@ -812,7 +942,15 @@ GET  http://127.0.0.1:4000/v1/models
 GET  http://127.0.0.1:8890/api/health                 (BFF, needs X-Auth-User)
 POST http://127.0.0.1:8890/api/chat                   (durable job)
 GET  http://127.0.0.1:8890/api/stream?job_id=…&after=0  (SSE replay)
+GET  http://127.0.0.1:8890/api/kb/status              (KB: source dir, counts, latest ingestion)
+POST http://127.0.0.1:8890/api/kb/ingest              (KB: ingest all .md files, idempotent)
+GET  http://127.0.0.1:8890/api/kb/documents           (KB: list documents)
+GET  http://127.0.0.1:8890/api/kb/search?q=…          (KB: FTS5 full-text search)
+GET  http://127.0.0.1:8890/api/kb/equations           (KB: list equations)
+GET  http://127.0.0.1:8890/api/kb/symbols             (KB: list symbols)
 GET  https://t.aryan.cfd/agentcyto/api/health        (live, basic auth)
+POST https://t.aryan.cfd/agentcyto/api/v1/chat/completions  (OpenAI-compatible; Authorization: Bearer <LITELLM_MASTER_KEY>)
+GET  https://t.aryan.cfd/agentcyto/api/v1/models     (OpenAI-compatible model list; same bearer auth)
 ```
 
 ### Critical file paths
@@ -820,7 +958,10 @@ GET  https://t.aryan.cfd/agentcyto/api/health        (live, basic auth)
 ```
 /home/ubuntu/cyto/agentcyto/.env
 /home/ubuntu/cyto/agentcyto/workspaces/<hex-session-id>/
+/home/ubuntu/cyto/agentcyto/repo/physics/          (KB source of truth: 13 physics .md files, read-only)
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/app.py
+/home/ubuntu/cyto/agentcyto/agentcyto/bff/db.py
+/home/ubuntu/cyto/agentcyto/agentcyto/bff/kb.py    (KB ingestion pipeline)
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/modes.yaml
 /home/ubuntu/cyto/agentcyto/agentcyto/state/agentcyto.db
 /home/ubuntu/cyto/agentcyto/agentcyto/ui/

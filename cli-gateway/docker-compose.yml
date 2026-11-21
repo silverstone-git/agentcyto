@@ -65,10 +65,13 @@ services:
       GATEWAY_SESSION_DB: /gateway-state/sessions.db
       REQUIRE_AUTH_HEADER: ${REQUIRE_AUTH_HEADER:-1}
       AGENCYTO_DAILY_BUDGET_USD: ${AGENCYTO_DAILY_BUDGET_USD:-}
+      KB_SOURCE_DIR: /kb-source
     volumes:
       - ../agentcyto/state:/state
       - gateway-state:/gateway-state
       - ${WORKSPACE_DIR:-./workspace}:/workspaces
+      # Knowledge base source: read-only mount of the physics documents.
+      - ../repo/physics:/kb-source:ro
     ports:
       - "127.0.0.1:${BFF_PORT:-8890}:8000"
     depends_on:

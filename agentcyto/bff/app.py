@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -22,6 +23,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from db import DB, clear_gateway_sessions
+from kb import get_kb, KB
+
+KB_SOURCE_DIR = os.environ.get("KB_SOURCE_DIR", "/kb-source")
+KB_INGEST_TIMEOUT = int(os.environ.get("KB_INGEST_TIMEOUT_SECONDS", "3600"))
+_kb_tasks: dict[str, asyncio.Task] = {}
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://gateway:4000").rstrip("/")
 MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
@@ -221,6 +227,15 @@ def restore_jobs() -> None:
 async def lifespan(app: FastAPI):
     load_modes()
     restore_jobs()
+    kb = get_kb(db)
+    if Path(KB_SOURCE_DIR).exists():
+        files = list(kb.source_files())
+        if files:
+            app.state.kb_files = len(files)
+        else:
+            app.state.kb_files = 0
+    else:
+        app.state.kb_files = 0
     yield
 
 
@@ -413,6 +428,238 @@ async def usage(limit: int = 100):
     start = time.time() - (time.time() % 86400)
     return {"spent_usd": db.spend_since(start), "budget_usd": cap,
             "recent": db.usage_recent(min(limit, 500))}
+
+
+# --------------------------------------------------------------------------- #
+# Knowledge base API
+# --------------------------------------------------------------------------- #
+
+class KBReindexRequest(BaseModel):
+    force: bool = False
+
+
+class KBEnrichRequest(BaseModel):
+    model: str = "heavy"
+
+
+@app.get("/api/kb/status")
+async def kb_status():
+    kb = get_kb(db)
+    files = kb.source_files()
+    docs = kb.db.kb_list_documents()
+    latest = kb.db.kb_list_ingestions(limit=1)
+    total_nodes = 0
+    total_equations = 0
+    total_symbols = 0
+    try:
+        with kb.db.conn() as c:
+            total_nodes = int(c.execute("SELECT COUNT(*) FROM kb_nodes").fetchone()[0])
+            total_equations = int(c.execute(
+                "SELECT COUNT(*) FROM kb_nodes WHERE type='equation'").fetchone()[0])
+            total_symbols = int(c.execute("SELECT COUNT(*) FROM kb_symbols").fetchone()[0])
+    except sqlite3.Error:
+        pass
+    return {
+        "source_dir": str(KB_SOURCE_DIR),
+        "source_dir_exists": Path(KB_SOURCE_DIR).exists(),
+        "source_files": len(files),
+        "documents": len(docs),
+        "total_nodes": total_nodes,
+        "total_equations": total_equations,
+        "total_symbols": total_symbols,
+        "latest_ingestion": latest[0] if latest else None,
+    }
+
+
+@app.post("/api/kb/ingest")
+async def kb_ingest():
+    kb = get_kb(db)
+    files = kb.source_files()
+    if not files:
+        return {"status": "nothing", "files_found": 0,
+                "message": f"No .md files found in {KB_SOURCE_DIR}"}
+
+    ingestion_id = uuid.uuid4().hex
+
+    def run():
+        try:
+            return kb.ingest_all(ingestion_id, force=False)
+        finally:
+            _kb_tasks.pop(ingestion_id, None)
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    _kb_tasks[ingestion_id] = task
+    task.add_done_callback(lambda t: _kb_tasks.pop(ingestion_id, None))
+
+    return {"status": "queued", "ingestion_id": ingestion_id,
+            "files_found": len(files)}
+
+
+@app.post("/api/kb/reindex")
+async def kb_reindex():
+    kb = get_kb(db)
+    files = kb.source_files()
+    if not files:
+        return {"status": "nothing", "files_found": 0}
+
+    ingestion_id = uuid.uuid4().hex
+
+    def run():
+        try:
+            return kb.reindex_all(ingestion_id)
+        finally:
+            _kb_tasks.pop(ingestion_id, None)
+
+    task = asyncio.create_task(asyncio.to_thread(run))
+    _kb_tasks[ingestion_id] = task
+    task.add_done_callback(lambda t: _kb_tasks.pop(ingestion_id, None))
+
+    return {"status": "queued", "ingestion_id": ingestion_id,
+            "files_found": len(files)}
+
+
+@app.delete("/api/kb/clear")
+async def kb_clear():
+    kb = get_kb(db)
+    return kb.clear_all()
+
+
+@app.get("/api/kb/documents")
+async def kb_documents():
+    return get_kb(db).db.kb_list_documents()
+
+
+@app.get("/api/kb/documents/{doc_id}")
+async def kb_document(doc_id: str):
+    kb = get_kb(db)
+    doc = kb.db.kb_get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "document not found")
+    doc["tree"] = kb.db.kb_get_node_tree(doc_id)
+    return doc
+
+
+@app.delete("/api/kb/documents/{doc_id}")
+async def kb_delete_document(doc_id: str):
+    kb = get_kb(db)
+    if not kb.db.kb_get_document(doc_id):
+        raise HTTPException(404, "document not found")
+    docs_removed, nodes_removed = kb.db.kb_delete_document(doc_id)
+    return {"status": "deleted", "documents_removed": docs_removed,
+            "nodes_removed": nodes_removed}
+
+
+@app.get("/api/kb/search")
+async def kb_search(q: str | None = None, type: str | None = None,
+                    doc: str | None = None, limit: int = 50):
+    kb = get_kb(db)
+    results: list[dict] = []
+    if q:
+        # FTS5 full-text search
+        fts_query = q
+        try:
+            results = kb.db.kb_search_fts(fts_query, limit=limit,
+                                          doc_id=doc, node_type=type)
+        except sqlite3.Error:
+            results = []
+    elif type or doc:
+        # List nodes of a given type / document without full-text
+        with kb.db.conn() as c:
+            sql = "SELECT * FROM kb_nodes WHERE 1=1"
+            params: list = []
+            if doc:
+                sql += " AND document_id=?"
+                params.append(doc)
+            if type:
+                sql += " AND type=?"
+                params.append(type)
+            sql += " ORDER BY id LIMIT ?"
+            params.append(limit)
+            results = [dict(r) for r in c.execute(sql, params).fetchall()]
+    else:
+        return {"results": [], "message": "provide q, type, and/or doc"}
+
+    # Enrich each result with parent section and document info
+    enriched = []
+    for r in results:
+        d = dict(r)
+        parent = kb.db.kb_get_node(d["parent_id"]) if d.get("parent_id") else None
+        doc_row = kb.db.kb_get_document(d["document_id"]) if d.get("document_id") else None
+        d["parent_title"] = parent.get("title") if parent else None
+        d["parent_type"] = parent.get("type") if parent else None
+        d["document_name"] = doc_row.get("file_name") if doc_row else None
+        d["document_title"] = doc_row.get("title") if doc_row else None
+        enriched.append(d)
+    return {"results": enriched, "count": len(enriched)}
+
+
+@app.get("/api/kb/nodes/{node_id}")
+async def kb_node(node_id: str):
+    kb = get_kb(db)
+    node = kb.db.kb_get_node(node_id)
+    if not node:
+        raise HTTPException(404, "node not found")
+    doc = kb.db.kb_get_document(node["document_id"]) if node.get("document_id") else None
+    children = kb.db.kb_node_children(node_id)
+    edges = kb.db.kb_get_edges(node_id)
+    return {"node": node, "document": doc, "children": children, "edges": edges}
+
+
+@app.get("/api/kb/equations")
+async def kb_equations(doc: str | None = None, limit: int = 200):
+    return get_kb(db).db.kb_get_equations(doc_id=doc, limit=limit)
+
+
+@app.get("/api/kb/symbols")
+async def kb_symbols(doc: str | None = None, limit: int = 200):
+    return get_kb(db).db.kb_get_symbols(doc_id=doc, limit=limit)
+
+
+@app.get("/api/kb/symbols/{symbol_id}/occurrences")
+async def kb_symbol_occurrences(symbol_id: str):
+    return get_kb(db).db.kb_get_symbol_occurrences(symbol_id)
+
+
+@app.get("/api/kb/derivations")
+async def kb_derivations(doc: str | None = None):
+    return get_kb(db).db.kb_get_derivations(doc_id=doc)
+
+
+@app.get("/api/kb/concepts")
+async def kb_concepts(doc: str | None = None):
+    return get_kb(db).db.kb_get_concepts(doc_id=doc)
+
+
+@app.get("/api/kb/stats")
+async def kb_stats():
+    return get_kb(db).db.kb_count_by_type()
+
+
+@app.post("/api/kb/enrich")
+async def kb_enrich(req: KBEnrichRequest):
+    kb = get_kb(db)
+    import httpx
+    try:
+        result = await kb.enrich_section_summaries(
+            GATEWAY_URL, MASTER_KEY, model=req.model)
+        # Rebuild FTS after enrichment changed content
+        kb._rebuild_all_fts()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, str(exc)[:500])
+
+
+@app.get("/api/kb/ingestions")
+async def kb_ingestions(limit: int = 50):
+    return get_kb(db).db.kb_list_ingestions(limit=limit)
+
+
+@app.get("/api/kb/ingestions/{ingestion_id}")
+async def kb_ingestion(ingestion_id: str):
+    ing = get_kb(db).db.kb_get_ingestion(ingestion_id)
+    if not ing:
+        raise HTTPException(404, "ingestion not found")
+    return ing
 
 
 # Static UI last so /api/* routes always win. nginx proxies /agentcyto/ here.

@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 cli-gateway/secrets/cli-state/
 cli-gateway/secrets/gateway.env
+repo/*
 
 agentcyto/state/*
 !agentcyto/state/.keep

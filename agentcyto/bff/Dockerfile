@@ -14,7 +14,7 @@ WORKDIR /app
 COPY bff/requirements.txt ./
 RUN pip install -r requirements.txt
 
-COPY bff/app.py bff/db.py bff/modes.yaml ./
+COPY bff/app.py bff/db.py bff/kb.py bff/modes.yaml ./
 COPY ui/ ./ui/
 
 RUN useradd --create-home --uid "${APP_UID}" app \
