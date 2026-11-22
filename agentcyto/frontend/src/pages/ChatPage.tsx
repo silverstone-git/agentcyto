@@ -19,6 +19,7 @@ export default function ChatPage() {
   const [kbDocs, setKbDocs] = useState<any[]>([])
   const [attachedKb, setAttachedKb] = useState<Set<string>>(new Set())
   const [logOpen, setLogOpen] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(false)
   const [logs, setLogs] = useState<{ type: string; text: string; detail?: string; time: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
@@ -322,11 +323,18 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-full relative">
-      <header className="h-14 glass border-b border-surface-border flex items-center justify-between px-6 z-30">
-        <div className="flex items-center gap-4">
+      <header className="h-14 glass border-b border-surface-border flex items-center justify-between pl-14 pr-3 md:px-6 z-30 gap-2 shrink-0">
+        <div className="flex items-center gap-2 md:gap-4 min-w-0">
+          <button
+            onClick={() => setPanelOpen(!panelOpen)}
+            className="p-2 rounded-xl hover:bg-surface-border text-ink-400 transition-colors md:hidden"
+            title="Sessions & knowledge base"
+          >
+            <span className="text-lg leading-none">☷</span>
+          </button>
           <button
             onClick={newSession}
-            className="p-2 rounded-xl hover:bg-surface-border text-ink-400 transition-colors"
+            className="p-2 rounded-xl hover:bg-surface-border text-ink-400 transition-colors hidden md:block"
             title="New conversation"
           >
             <Plus className="w-5 h-5" />
@@ -375,7 +383,7 @@ export default function ChatPage() {
           ) : (
             <button
               onClick={newSession}
-              className="px-4 py-1.5 rounded-xl bg-brand-600 text-white text-sm font-medium shadow-glow hover:bg-brand-500 transition-colors"
+              className="inline-flex items-center whitespace-nowrap px-3 md:px-4 py-1.5 rounded-xl bg-brand-600 text-white text-sm font-medium shadow-glow hover:bg-brand-500 transition-colors"
             >
               <Plus className="w-4 h-4 mr-1" /> New chat
             </button>
@@ -385,7 +393,7 @@ export default function ChatPage() {
 
       <div className="flex flex-1 overflow-hidden relative">
         {/* Session list sidebar */}
-        <aside className="w-72 shrink-0 min-h-0 overflow-hidden glass border-r border-surface-border flex flex-col z-20">
+        <aside className={`${panelOpen ? 'flex' : 'hidden'} md:flex absolute md:static inset-y-0 left-0 w-[85%] max-w-xs md:w-72 shrink-0 min-h-0 overflow-hidden bg-surface-elevated md:bg-surface-elevated/60 md:backdrop-blur-xl border-r border-surface-border flex-col z-40`}>
           <div className="p-4 border-b max-h-[45%] overflow-y-auto ink-scroll shrink-0 border-b border-surface-border">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-ink-200">Sessions</h2>
@@ -458,17 +466,17 @@ export default function ChatPage() {
                     <button
                       key={d.id}
                       onClick={() => toggleKB(d.id)}
-                      className={`flex items-center justify-between px-3 py-2 rounded-xl text-sm transition-colors ${
+                      className={`w-full text-left flex items-center justify-between gap-3 px-3 py-2 rounded-xl text-sm transition-colors ${
                         attached
                           ? 'bg-brand-500/10 text-brand-400 border border-brand-500/20'
                           : 'text-ink-400 hover:bg-surface-border hover:text-ink-100'
                       }`}
                     >
-                      <div className="flex-1 truncate">
-                        <span className="block">{d.title || d.file_name}</span>
+                      <div className="flex-1 min-w-0">
+                        <span className="block truncate">{d.title || d.file_name}</span>
                         <span className="text-[10px] text-ink-600">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
                       </div>
-                      <span className={`w-2 h-2 rounded-full ${attached ? 'bg-brand-500' : 'bg-surface-border'}`} />
+                      <span className={`w-2 h-2 shrink-0 rounded-full ${attached ? 'bg-brand-500' : 'bg-surface-border'}`} />
                     </button>
                   )
                 })}
@@ -476,6 +484,8 @@ export default function ChatPage() {
             )}
           </div>
         </aside>
+
+        {panelOpen && <div className="md:hidden absolute inset-0 z-30 bg-black/50" onClick={() => setPanelOpen(false)} />}
 
         {/* Main chat area */}
         <main className="flex-1 flex flex-col min-w-0 bg-surface-base">
@@ -515,24 +525,24 @@ export default function ChatPage() {
           </div>
 
           {/* Composer */}
-          <div className="glass border-t border-surface-border p-4">
-            <form onSubmit={sendMessage} className="max-w-4xl mx-auto relative">
+          <div className="glass border-t border-surface-border p-2 md:p-4">
+            <form onSubmit={sendMessage} className="max-w-4xl mx-auto flex items-end gap-2 rounded-2xl border border-surface-border bg-surface-card pl-4 pr-2 py-2">
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Message agentcyto…"
                 rows={1}
-                className="w-full resize-none bg-transparent border-none text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
+                className="flex-1 min-w-0 resize-none bg-transparent border-none outline-none py-2 text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
                     sendMessage(e as any)
                   }
                 }}
-                style={{ minHeight: '24px', maxHeight: '200px', height: input ? Math.min(200, inputRef.current?.scrollHeight || 24) : 24 }}
+                style={{ minHeight: '40px', maxHeight: '200px', height: input ? Math.min(200, Math.max(40, inputRef.current?.scrollHeight || 40)) : 40 }}
               />
-              <div className="absolute bottom-2 right-2 flex items-center gap-2">
+              <div className="flex items-center shrink-0">
                 {!streaming ? (
                   <button
                     type="submit"

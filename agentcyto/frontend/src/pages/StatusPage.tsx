@@ -111,21 +111,21 @@ export default function StatusPage() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-surface-border text-ink-600">
-                  <th className="pb-2">Time</th>
-                  <th className="pb-2">Model</th>
-                  <th className="pb-2 text-right">Tokens</th>
-                  <th className="pb-2 text-right">Cost</th>
-                  <th className="pb-2">Status</th>
+                  <th className="pb-2 pr-3 whitespace-nowrap">Time</th>
+                  <th className="pb-2 pr-3 whitespace-nowrap">Model</th>
+                  <th className="pb-2 pr-3 whitespace-nowrap text-right">Tokens</th>
+                  <th className="pb-2 pr-3 whitespace-nowrap text-right">Cost</th>
+                  <th className="pb-2 pr-3 whitespace-nowrap">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-border">
                 {usage.recent.slice().reverse().map((u: any, i: number) => (
                   <tr key={i}>
-                    <td className="py-2 text-ink-400">{u.timestamp || '—'}</td>
-                    <td className="py-2 text-ink-300">{u.model || '—'}</td>
-                    <td className="py-2 text-ink-300 text-right">{u.tokens || '—'}</td>
-                    <td className="py-2 text-ink-300 text-right">${(u.cost_usd || 0).toFixed(4)}</td>
-                    <td className="py-2">
+                    <td className="py-2 pr-3 text-ink-400">{u.timestamp || '—'}</td>
+                    <td className="py-2 pr-3 text-ink-300">{u.model || '—'}</td>
+                    <td className="py-2 pr-3 text-ink-300 text-right">{u.tokens || '—'}</td>
+                    <td className="py-2 pr-3 text-ink-300 text-right">${(u.cost_usd || 0).toFixed(4)}</td>
+                    <td className="py-2 pr-3">
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium">
                         {u.status === 'done' ? (
                           <>

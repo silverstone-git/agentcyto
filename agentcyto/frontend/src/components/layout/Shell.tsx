@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 
 export default function Shell({ children }: { children: React.ReactNode }) {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(typeof window !== 'undefined' && window.innerWidth < 768)
 
   const navItems = [
     { to: '/chat', label: 'Chat', icon: '💬' },
@@ -11,12 +11,20 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   ]
 
   return (
-    <div className="flex h-screen overflow-hidden text-ink-50">
+    <div className="flex h-[100dvh] overflow-hidden text-ink-50">
+      {!collapsed && (
+        <div className="fixed inset-0 z-30 bg-black/60 md:hidden" onClick={() => setCollapsed(true)} />
+      )}
+      <button
+        onClick={() => setCollapsed(false)}
+        className={`fixed top-2 left-2 z-20 p-2 rounded-xl glass text-ink-200 md:hidden ${collapsed ? '' : 'hidden'}`}
+        aria-label="Open menu"
+      >☰</button>
       <aside
         className={`
           fixed inset-y-0 left-0 z-40 w-64 glass
           transition-all duration-300
-          ${collapsed ? 'w-16 -translate-x-full md:-translate-x-0 md:w-16' : ''}
+          ${collapsed ? '-translate-x-full md:translate-x-0 md:w-16' : ''}
           border-r border-surface-border
         `}
       >
@@ -44,6 +52,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               <NavLink
                 key={item.to}
                 to={item.to}
+                onClick={() => { if (window.innerWidth < 768) setCollapsed(true) }}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
                     isActive
@@ -69,7 +78,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
         <main className={`
           flex-1 flex flex-col overflow-hidden
-          ${collapsed ? 'pl-16' : 'pl-64'}
+          ${collapsed ? 'md:pl-16' : 'md:pl-64'}
           transition-all duration-300
         `}>
           {children}
