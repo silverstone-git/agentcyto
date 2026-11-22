@@ -1,9 +1,16 @@
 import { PREFIX } from '../lib/prefix'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, Send, StopCircle, Loader2, FileText, Sparkles } from 'lucide-react'
+import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen } from 'lucide-react'
 import { api, Message, Session } from '../lib/api'
 import MessageBubble from '../components/chat/MessageBubble'
 import Trace, { Turn, emptyTurn } from '../components/chat/Trace'
+import CitationModal from '../components/chat/CitationModal'
+import { QuoteChip, parseReply } from '../components/chat/MessageBubble'
+
+// Plain-text snippet for the reply quote (no raw LaTeX / markdown noise).
+const cleanQuote = (t: string) =>
+  t.replace(/\$\$[\s\S]*?\$\$/g, '[equation]').replace(/\\\[[\s\S]*?\\\]/g, '[equation]')
+    .replace(/\$([^$]+)\$/g, '$1').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 300)
 
 export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -21,6 +28,9 @@ export default function ChatPage() {
   const [attachedKb, setAttachedKb] = useState<Set<string>>(new Set())
   const [logOpen, setLogOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
+  const [replyTo, setReplyTo] = useState<{ role: 'user' | 'assistant'; content: string } | null>(null)
+  const [kbMenu, setKbMenu] = useState(false)
+  const [citeHit, setCiteHit] = useState<any | null>(null)
   const [logs, setLogs] = useState<{ type: string; text: string; detail?: string; time: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
@@ -171,9 +181,15 @@ export default function ChatPage() {
     setStreaming(true)
     startedAtRef.current = Date.now()
 
-    const userMsg: Message = { role: 'user', content: text }
+    const userMsg: Message = {
+      role: 'user',
+      content: replyTo
+        ? `[In reply to ${replyTo.role === 'assistant' ? "the assistant's" : 'my'} earlier message: "${replyTo.content.replace(/\s+/g, ' ').slice(0, 600)}"]\n\n${text}`
+        : text,
+    }
     setMessages((prev) => [...prev, userMsg])
     setInput('')
+    setReplyTo(null)
     inputRef.current?.focus()
 
     log('info', 'Message queued', `mode: ${mode} · role: ${role}` + (attachedKb.size ? ` · KB: ${attachedKb.size} repo(s)` : ''))
@@ -185,6 +201,7 @@ export default function ChatPage() {
         role,
         kb_docs: Array.from(attachedKb),
       }
+      if (replyTo) body.reply_to = replyTo
       if (sessionId) body.session_id = sessionId
       if (model) body.model = model
 
@@ -524,13 +541,20 @@ export default function ChatPage() {
                   role={msg.role}
                   content={msg.content}
                   model={msg.role === 'assistant' ? (msg.model || undefined) : undefined}
+                  citations={msg.meta?.retrieval?.hits?.length || 0}
+                  onCite={(n) => { const h = msg.meta?.retrieval?.hits?.find((x: any) => x.n === n); if (h) setCiteHit(h) }}
+                  onReply={() => setReplyTo({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: cleanQuote(msg.role === 'user' ? (parseReply(msg.content)?.body ?? msg.content) : msg.content) })}
                 />
               </div>
             ))}
             {streaming && (
               <div className="mb-6">
                 <Trace turn={live} live />
-                <MessageBubble role="assistant" content={live.text} meta={{ attempt, streaming: true }} />
+                <MessageBubble
+                  role="assistant" content={live.text} meta={{ attempt, streaming: true }}
+                  citations={live.retrieval?.hits?.length || 0}
+                  onCite={(n) => { const h = live.retrieval?.hits?.find((x: any) => x.n === n); if (h) setCiteHit(h) }}
+                />
               </div>
             )}
             {error && (
@@ -548,12 +572,66 @@ export default function ChatPage() {
 
           {/* Composer */}
           <div className="glass border-t border-surface-border p-2 md:p-4">
-            <form onSubmit={sendMessage} className="max-w-4xl mx-auto flex items-end gap-2 rounded-2xl border border-surface-border bg-surface-card pl-4 pr-2 py-2">
+            <form onSubmit={sendMessage} className="max-w-4xl mx-auto relative rounded-2xl border border-surface-border bg-surface-card">
+              {replyTo && (
+                <div className="px-2 pt-2"><QuoteChip who={replyTo.role} quote={replyTo.content} onClear={() => setReplyTo(null)} /></div>
+              )}
+              {attachedKb.size > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                  <BookOpen className="w-3.5 h-3.5 text-brand-400" />
+                  {kbDocs.filter((d) => attachedKb.has(d.id)).map((d) => (
+                    <span key={d.id} className="inline-flex items-center gap-1 max-w-[14rem] pl-2 pr-1 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/30 text-[11px] text-brand-400">
+                      <span className="truncate">{d.title || d.file_name}</span>
+                      <button type="button" onClick={() => toggleKB(d.id)} className="w-4 h-4 rounded-full hover:bg-brand-500/30 flex items-center justify-center" aria-label="Detach">×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-end gap-1 pl-1.5 pr-2 py-2">
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setKbMenu(!kbMenu)}
+                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${attachedKb.size ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
+                  title="Attach knowledge base"
+                  aria-label="Attach knowledge base"
+                >
+                  <Plus className={`w-5 h-5 transition-transform ${kbMenu ? 'rotate-45' : ''}`} />
+                </button>
+                {kbMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setKbMenu(false)} />
+                    <div className="absolute bottom-12 left-0 z-50 w-72 max-w-[80vw] max-h-72 overflow-y-auto ink-scroll rounded-2xl bg-surface-elevated border border-surface-border shadow-glass p-2 slide-in">
+                      <div className="flex items-center justify-between px-2 py-1">
+                        <span className="text-xs font-semibold text-ink-200">Knowledge base</span>
+                        <span className="flex gap-1">
+                          <button type="button" onClick={attachAllKB} className="px-2 py-0.5 rounded-lg text-[10px] bg-surface-border text-ink-300">All</button>
+                          <button type="button" onClick={detachAllKB} className="px-2 py-0.5 rounded-lg text-[10px] bg-surface-border text-ink-300">None</button>
+                        </span>
+                      </div>
+                      {kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents ingested yet.</div>}
+                      {kbDocs.map((d) => {
+                        const on = attachedKb.has(d.id)
+                        return (
+                          <button type="button" key={d.id} onClick={() => toggleKB(d.id)}
+                            className={`w-full text-left flex items-center gap-2 px-2 py-2 rounded-xl text-sm ${on ? 'bg-brand-500/10 text-brand-400' : 'text-ink-200 hover:bg-surface-border'}`}>
+                            <span className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${on ? 'bg-brand-500 border-brand-500 text-white' : 'border-ink-600'}`}>{on ? '✓' : ''}</span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate">{d.title || d.file_name}</span>
+                              <span className="text-[10px] text-ink-500">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Message agentcyto…"
+                placeholder={replyTo ? 'Reply…' : attachedKb.size ? 'Ask about the attached knowledge base…' : 'Message agentcyto…'}
                 rows={1}
                 className="flex-1 min-w-0 resize-none bg-transparent border-none outline-none py-2 text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
                 onKeyDown={(e) => {
@@ -583,10 +661,13 @@ export default function ChatPage() {
                   </button>
                 )}
               </div>
+              </div>
             </form>
           </div>
         </main>
       </div>
+
+      {citeHit && <CitationModal hit={citeHit} onClose={() => setCiteHit(null)} />}
 
       {/* System log drawer */}
       <div className="shrink-0 z-30">

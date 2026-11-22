@@ -18,10 +18,10 @@ function Fold({ icon, title, badge, open: initial, children }: any) {
   const [open, setOpen] = useState(!!initial)
   return (
     <div className="mb-2 rounded-xl border border-surface-border bg-surface-elevated/60 overflow-hidden">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink-300 hover:bg-surface-border/40">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3 py-2 text-xs text-left text-ink-300 hover:bg-surface-border/40">
         {icon}
-        <span className="font-medium">{title}</span>
-        {badge && <span className="ml-auto text-[10px] text-ink-500">{badge}</span>}
+        <span className="font-medium shrink-0">{title}</span>
+        {badge && <span className="ml-auto text-[10px] text-ink-500 truncate min-w-0">{badge}</span>}
         {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
       </button>
       {open && <div className="px-3 pb-3 text-xs">{children}</div>}

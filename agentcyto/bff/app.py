@@ -131,6 +131,9 @@ def estimate_cost(model: str | None, usage: dict | None) -> float:
 _STOP = set("a an and are as at be but by can could do does for from how i if in into is it its me my of on or our so than that the their then there these this to was we what when where which who why will with would you your explain tell about please give show describe using use find derive".split())
 
 
+_HEADING_TYPES = {"document", "chapter", "section", "subsection", "subsubsection"}
+
+
 def _terms(text: str) -> list[str]:
     seen: list[str] = []
     for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text.lower()):
@@ -144,11 +147,13 @@ def _kb_search(doc_ids: list[str], match: str, per_doc: int) -> list[dict]:
     hits: list[dict] = []
     for d in doc_ids:
         try:
-            hits += kb.db.kb_search_fts(match, limit=per_doc, doc_id=d)
+            hits += kb.db.kb_search_fts(match, limit=per_doc * 4, doc_id=d)
         except sqlite3.Error:
             continue
     hits.sort(key=lambda h: h["rank"])  # bm25: lower is better
-    return hits
+    # Headings match query words but carry no content; prefer real passages.
+    body = [h for h in hits if h["type"] not in _HEADING_TYPES]
+    return (body or hits)[: per_doc * max(1, len(doc_ids))]
 
 
 async def retrieve_kb_context(job_id: str, doc_ids: list[str], session_id: str) -> str:
@@ -205,7 +210,8 @@ async def retrieve_kb_context(job_id: str, doc_ids: list[str], session_id: str) 
         total += len(chunk)
         used.append({"n": i, "type": h["type"], "doc": titles.get(h["document_id"]),
                      "section": (sec or {}).get("title"), "label": h.get("label"),
-                     "lines": f"{h['line_start']}-{h['line_end']}", "preview": body[:160]})
+                     "lines": f"{h['line_start']}-{h['line_end']}", "preview": body[:160],
+                     "text": body, "node_id": h["id"]})
     db.add_event(job_id, "retrieval", {"method": "fts5-bm25", "terms": terms, "hits": used})
     tr("decision", f"Injecting top {len(parts)} passage(s) into the model context.")
     return ("Reference passages retrieved from the user's attached knowledge base. Prefer them "
@@ -362,6 +368,7 @@ class ChatRequest(BaseModel):
     model: str | None = None
     idempotency_key: str | None = None
     kb_docs: list[str] | None = None
+    reply_to: dict | None = None  # {"role": "user"|"assistant", "content": str}
 
 
 class SessionRequest(BaseModel):
@@ -462,7 +469,12 @@ async def chat(req: ChatRequest):
 
     if req.role == "agent" or "-agent" in alias:
         ensure_workspace(session_id)
-    db.add_message(session_id, "user", req.message)
+    user_text = req.message
+    if req.reply_to and isinstance(req.reply_to.get("content"), str):
+        who = "the assistant's" if req.reply_to.get("role") == "assistant" else "my"
+        quote = " ".join(req.reply_to["content"].split())[:600]
+        user_text = f'[In reply to {who} earlier message: "{quote}"]\n\n{req.message}'
+    db.add_message(session_id, "user", user_text)
 
     job_id = uuid.uuid4().hex
     db.create_job(job_id, session_id, req.mode, req.role, alias, req.idempotency_key,
