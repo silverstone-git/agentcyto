@@ -38,6 +38,7 @@ POST http://127.0.0.1:8890/api/sessions/{id}/autoname (BFF: AI-generated chat ti
 GET  https://t.aryan.cfd/agentcyto/api/health        (live, basic auth)
 POST https://t.aryan.cfd/agentcyto/api/v1/chat/completions  (OpenAI-compatible; Authorization: Bearer <LITELLM_MASTER_KEY>)
 GET  https://t.aryan.cfd/agentcyto/api/v1/models     (OpenAI-compatible model list; same bearer auth)
+POST https://t.aryan.cfd/agentcyto/api/retrieve      (KB retrieval for outstagram; Bearer <RETRIEVE_API_KEY|LITELLM_MASTER_KEY>; needs nginx auth_basic off)
 ```
 
 ### Critical file paths

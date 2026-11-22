@@ -6,6 +6,7 @@ by nginx; the BFF only checks the forwarded X-Auth-User header.
 """
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -37,6 +38,9 @@ MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 WORKSPACE_DIR = os.environ.get("CLI_WORKSPACE_DIR", "/workspaces")
 MODES_FILE = os.environ.get("AGENCYTO_MODES", "/app/modes.yaml")
 REQUIRE_AUTH_HEADER = os.environ.get("REQUIRE_AUTH_HEADER", "1") not in ("0", "false", "no")
+# Bearer key for server-to-server POST /api/retrieve; defaults to the gateway master key, which any
+# such caller already holds to reach /api/v1, so it grants nothing new.
+RETRIEVE_API_KEY = os.environ.get("RETRIEVE_API_KEY") or MASTER_KEY
 DAILY_BUDGET_OVERRIDE = os.environ.get("AGENCYTO_DAILY_BUDGET_USD")
 MAX_ATTEMPTS = 2
 SESSION_RE = re.compile(r"^[0-9a-fA-F]{16,64}$")
@@ -310,10 +314,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="agentcyto BFF", lifespan=lifespan)
 
 
+def _service_bearer_ok(request: Request) -> bool:
+    """Server-to-server callers (e.g. outstagram) authenticate with a bearer key instead of
+    nginx basic auth. Only /api/retrieve accepts it."""
+    if not RETRIEVE_API_KEY:
+        return False
+    return hmac.compare_digest(request.headers.get("authorization", ""), f"Bearer {RETRIEVE_API_KEY}")
+
+
 @app.middleware("http")
 async def auth_boundary(request: Request, call_next):
     if REQUIRE_AUTH_HEADER and request.url.path.startswith("/api/") \
             and request.url.path != "/api/health":
+        if request.url.path == "/api/retrieve" and _service_bearer_ok(request):
+            return await call_next(request)
         if not request.headers.get("x-auth-user"):
             return JSONResponse({"detail": "missing X-Auth-User"}, status_code=401)
     return await call_next(request)
@@ -914,6 +928,52 @@ UI_INDEX = os.path.join(UI_DIR, "index.html")
 
 if os.path.isdir(UI_DIR):
     app.mount("/assets", StaticFiles(directory=os.path.join(UI_DIR, "assets")), name="assets")
+
+
+class _CaptureEvents:
+    """Lets Retriever run outside a chat job: trace/retrieval events are kept in memory and
+    returned to the caller; token usage still lands in the real usage table."""
+
+    def __init__(self, real: DB):
+        self.real, self.events = real, []
+
+    def add_event(self, job_id: str, event_type: str, data: dict) -> int:
+        self.events.append({"type": event_type, **data})
+        return len(self.events)
+
+    def record_usage(self, *args, **kwargs) -> None:
+        self.real.record_usage(*args, **kwargs)
+
+
+class RetrieveRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    docs: list[str] | None = None       # KB document ids; default: every document
+    llm: bool = True                    # LLM planning + rerank (agentcyto's default)
+    web: bool = False
+    history: list[dict] | None = None   # optional prior turns [{role, content}] for follow-ups
+
+
+@app.post("/api/retrieve")
+async def retrieve(req: RetrieveRequest):
+    """Stateless retrieval: the same pipeline chat uses (retrieval.py), without a session.
+    Returns the prompt-ready context block plus structured passages."""
+    kb = get_kb(db)
+    known = [d["id"] for d in kb.db.kb_list_documents()]
+    doc_ids = [d for d in (req.docs or known) if d in known]
+    history = [{"role": m["role"], "content": m["content"][:4000]} for m in (req.history or [])
+               if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+               and isinstance(m.get("content"), str)][-8:]
+    history.append({"role": "user", "content": req.query})
+    rid = "rtv-" + uuid.uuid4().hex[:16]
+    cap = _CaptureEvents(db)
+    r = Retriever(db=cap, kb=kb, job_id=rid, session_id="api:retrieve", gateway_url=GATEWAY_URL,
+                  master_key=MASTER_KEY, cfg=modes.get("retrieval") or {}, llm=req.llm, web=req.web,
+                  price=lambda m, u: estimate_cost(m, u))
+    ctx, info = await r.run(doc_ids, history)
+    info = info or {}
+    return {"id": rid, "context": ctx, "method": info.get("method"), "passages": info.get("hits", []),
+            "queries": info.get("queries", []), "docs": doc_ids,
+            "trace": [e for e in cap.events if e["type"] == "trace"]}
 
 
 @app.get("/favicon.svg")
