@@ -13,16 +13,16 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-[100dvh] overflow-hidden text-ink-50">
       {!collapsed && (
-        <div className="fixed inset-0 z-30 bg-black/60 md:hidden" onClick={() => setCollapsed(true)} />
+        <div className="fixed inset-0 z-[65] bg-black/60 md:hidden" onClick={() => setCollapsed(true)} />
       )}
       <button
         onClick={() => setCollapsed(false)}
-        className={`fixed top-2 left-2 z-20 h-10 w-10 rounded-xl bg-surface-card border border-surface-border text-ink-50 text-lg flex items-center justify-center md:hidden active:bg-surface-border ${collapsed ? '' : 'hidden'}`}
+        className={`fixed top-2 left-2 z-[60] h-10 w-10 rounded-xl bg-surface-card border border-surface-border text-ink-50 text-lg flex items-center justify-center md:hidden active:bg-surface-border ${collapsed ? '' : 'hidden'}`}
         aria-label="Open menu"
       >☰</button>
       <aside
         className={`
-          fixed inset-y-0 left-0 z-40 w-64 glass
+          fixed inset-y-0 left-0 z-[70] w-64 glass max-md:!bg-surface-elevated max-md:!backdrop-blur-none
           transition-all duration-300
           ${collapsed ? '-translate-x-full md:translate-x-0 md:w-16' : ''}
           border-r border-surface-border
