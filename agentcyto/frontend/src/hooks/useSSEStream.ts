@@ -1,3 +1,4 @@
+import { PREFIX } from '../lib/prefix'
 import { useCallback, useEffect, useRef } from 'react'
 
 export interface StreamEvent {
@@ -40,7 +41,7 @@ export function useSSEStream(
     async function run() {
       try {
         const res = await fetch(
-          `/api/stream?job_id=${encodeURIComponent(jobIdStr)}&after=${cursorRef.current}`,
+          `${PREFIX}/api/stream?job_id=${encodeURIComponent(jobIdStr)}&after=${cursorRef.current}`,
           { credentials: 'omit' }
         )
         if (!res.ok || !res.body) {

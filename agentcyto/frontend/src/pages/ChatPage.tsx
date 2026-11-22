@@ -1,3 +1,4 @@
+import { PREFIX } from '../lib/prefix'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Plus, Send, StopCircle, Loader2, FileText, Sparkles } from 'lucide-react'
 import { api, Message, Session } from '../lib/api'
@@ -17,7 +18,7 @@ export default function ChatPage() {
   const [attempt, setAttempt] = useState<number | null>(null)
   const [kbDocs, setKbDocs] = useState<any[]>([])
   const [attachedKb, setAttachedKb] = useState<Set<string>>(new Set())
-  const [logOpen, setLogOpen] = useState(true)
+  const [logOpen, setLogOpen] = useState(false)
   const [logs, setLogs] = useState<{ type: string; text: string; detail?: string; time: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
@@ -224,7 +225,7 @@ export default function ChatPage() {
         const saved = localStorage.getItem(`agentcyto.seq.${jobId}`)
         let after = saved ? Number(saved) : 0
 
-        const res = await fetch(`/api/stream?job_id=${encodeURIComponent(jobId)}&after=${after}`)
+        const res = await fetch(`${PREFIX}/api/stream?job_id=${encodeURIComponent(jobId)}&after=${after}`)
         if (!res.ok || !res.body) return
 
         const reader = res.body.getReader()
@@ -384,8 +385,8 @@ export default function ChatPage() {
 
       <div className="flex flex-1 overflow-hidden relative">
         {/* Session list sidebar */}
-        <aside className="w-80 glass border-r border-surface-border flex flex-col z-20">
-          <div className="p-4 border-b border-surface-border">
+        <aside className="w-72 shrink-0 min-h-0 overflow-hidden glass border-r border-surface-border flex flex-col z-20">
+          <div className="p-4 border-b max-h-[45%] overflow-y-auto ink-scroll shrink-0 border-b border-surface-border">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-ink-200">Sessions</h2>
               <button
@@ -556,17 +557,13 @@ export default function ChatPage() {
       </div>
 
       {/* System log drawer */}
-      <div className={`
-        absolute bottom-0 left-0 right-0 z-50
-        transition-all duration-300
-        ${logOpen ? 'translate-y-0' : 'translate-y-full'}
-      `}>
+      <div className="shrink-0 z-30">
         <div className="flex items-center justify-between px-4 py-2 bg-surface-elevated border-t border-surface-border cursor-pointer" onClick={toggleLog}>
           <h3 className="text-xs font-semibold text-ink-300">System log</h3>
           <span className="text-ink-500">{logOpen ? '▲' : '▼'}</span>
         </div>
         {logOpen && (
-          <div className="h-64 bg-surface-base border-t border-surface-border overflow-y-auto ink-scroll p-3 space-y-2">
+          <div className="h-44 bg-surface-base border-t border-surface-border overflow-y-auto ink-scroll p-3 space-y-2">
             {logs.map((l, i) => (
               <div key={i} className="flex gap-2 text-xs">
                 <span className={`w-6 text-center ${l.type === 'ok' ? 'text-success' : l.type === 'err' ? 'text-danger' : l.type === 'warn' ? 'text-warn' : 'text-ink-500'}`}>

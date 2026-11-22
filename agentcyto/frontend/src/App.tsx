@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { PREFIX } from './lib/prefix'
 import Shell from './components/layout/Shell'
 import ChatPage from './pages/ChatPage'
 import StatusPage from './pages/StatusPage'
@@ -6,7 +7,7 @@ import AdminPage from './pages/AdminPage'
 
 function App() {
   return (
-    <BrowserRouter basename="/">
+    <BrowserRouter basename={PREFIX || '/'}>
       <Shell>
         <Routes>
           <Route path="/chat" element={<ChatPage />} />

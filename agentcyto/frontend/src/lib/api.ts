@@ -1,4 +1,5 @@
-const BASE = typeof window !== 'undefined' ? '' : 'http://127.0.0.1:8890'
+import { PREFIX } from './prefix'
+const BASE = PREFIX
 
 async function apiJson(path: string, options: RequestInit = {}): Promise<any> {
   const res = await fetch(`${BASE}/api/${path}`, {
