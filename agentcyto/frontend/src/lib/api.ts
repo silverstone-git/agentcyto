@@ -158,6 +158,7 @@ export const api = {
   getSession: (id: string) => apiGet(`sessions/${id}`) as Promise<SessionDetail>,
   renameSession: (id: string, name: string) =>
     apiPatch(`sessions/${id}`, { name }) as Promise<SessionDetail>,
+  autonameSession: (id: string) => apiPost(`sessions/${id}/autoname`, {}) as Promise<Session>,
   deleteSession: (id: string) => apiDelete(`sessions/${id}`),
 
   chat: (body: any) => apiPost('chat', body),

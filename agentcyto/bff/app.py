@@ -444,6 +444,34 @@ async def rename_session(session_id: str, req: SessionRequest):
     return db.get_session(session_id)
 
 
+@app.post("/api/sessions/{session_id}/autoname")
+async def autoname_session(session_id: str):
+    """Ask a light model for a short topic title based on the first exchange."""
+    check_session(session_id)
+    if not db.get_session(session_id):
+        raise HTTPException(404, "session not found")
+    msgs = [m for m in db.get_history(session_id)][:4]
+    if not msgs:
+        raise HTTPException(400, "nothing to name yet")
+    convo = "\n\n".join(f"{m['role'].upper()}: {m['content'][:600]}" for m in msgs)
+    prompt = ("Write a short topic title (2 to 6 words, no quotes, no trailing punctuation) "
+              "for this conversation. Reply with the title only.\n\n" + convo)
+    payload = {"model": "light", "messages": [{"role": "user", "content": prompt}], "stream": False}
+    headers = {"Authorization": f"Bearer {MASTER_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as client:
+            resp = await client.post(f"{GATEWAY_URL}/v1/chat/completions", json=payload, headers=headers)
+        resp.raise_for_status()
+        title = resp.json()["choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"auto-name failed: {str(exc)[:200]}")
+    title = " ".join(title.replace("\n", " ").strip().strip("\"'`*#").split())[:60].rstrip(".")
+    if not title:
+        raise HTTPException(502, "auto-name returned an empty title")
+    db.rename_session(session_id, title)
+    return db.get_session(session_id)
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     check_session(session_id)

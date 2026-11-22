@@ -1,6 +1,6 @@
 import { PREFIX } from '../lib/prefix'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen } from 'lucide-react'
+import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen, MoreHorizontal, Pencil, Trash2, Wand2 } from 'lucide-react'
 import { api, Message, Session } from '../lib/api'
 import MessageBubble from '../components/chat/MessageBubble'
 import Trace, { Turn, emptyTurn } from '../components/chat/Trace'
@@ -31,6 +31,9 @@ export default function ChatPage() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [replyTo, setReplyTo] = useState<{ role: 'user' | 'assistant'; content: string } | null>(null)
   const [kbMenu, setKbMenu] = useState(false)
+  const [menuFor, setMenuFor] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null)
+  const [busyName, setBusyName] = useState<string | null>(null)
   const [citeHit, setCiteHit] = useState<any | null>(null)
   const [logs, setLogs] = useState<{ type: string; text: string; detail?: string; time: string }[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -100,6 +103,41 @@ export default function ChatPage() {
     loadModes()
     loadKBDocs()
   }, [loadSessions, loadModes, loadKBDocs])
+
+  const commitRename = async () => {
+    if (!renaming) return
+    const { id, draft } = renaming
+    setRenaming(null)
+    const name = draft.trim().slice(0, 80)
+    if (!name) return
+    try {
+      await api.renameSession(id, name)
+      setSessions((prev) => prev.map((x) => (x.id === id ? { ...x, name } : x)))
+      log('ok', 'Renamed chat', name)
+    } catch (err: any) { log('err', 'Rename failed', err.message) }
+  }
+
+  const autoName = async (id: string) => {
+    setMenuFor(null)
+    setBusyName(id)
+    try {
+      const r: any = await api.autonameSession(id)
+      setSessions((prev) => prev.map((x) => (x.id === id ? { ...x, name: r.name } : x)))
+      log('ok', 'Auto-named chat', r.name)
+    } catch (err: any) { log('err', 'Auto-name failed', err.message) }
+    finally { setBusyName(null) }
+  }
+
+  const removeSession = async (id: string) => {
+    setMenuFor(null)
+    if (!window.confirm('Delete this chat permanently?')) return
+    try {
+      await api.deleteSession(id)
+      setSessions((prev) => prev.filter((x) => x.id !== id))
+      if (id === sessionId) newSession()
+      log('ok', 'Deleted chat', id.slice(0, 8))
+    } catch (err: any) { log('err', 'Delete failed', err.message) }
+  }
 
   const selectSession = async (id: string) => {
     setPanelOpen(false)
@@ -447,19 +485,47 @@ export default function ChatPage() {
             </div>
             <div className="space-y-1">
               {sessions.filter((s: any) => s.messages > 0 || s.id === sessionId).map((s) => (
-                <button
+                <div
                   key={s.id}
-                  onClick={() => selectSession(s.id)}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-colors ${
+                  className={`relative group flex items-center rounded-xl text-sm transition-colors ${
                     sessionId === s.id
                       ? 'bg-brand-500/10 text-brand-400 border border-brand-500/20'
                       : 'text-ink-400 hover:bg-surface-border hover:text-ink-100'
                   }`}
                 >
-                  <FileText className="w-4 h-4 text-ink-600" />
-                  <span className="truncate">{s.name || '(untitled)'}</span>
-                  <span className="ml-auto text-[10px] text-ink-600">{s.id.slice(0, 8)}</span>
-                </button>
+                  {renaming?.id === s.id ? (
+                    <input
+                      autoFocus
+                      value={renaming.draft}
+                      onChange={(e) => setRenaming({ id: s.id, draft: e.target.value })}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenaming(null) }}
+                      className="flex-1 min-w-0 mx-2 my-1.5 px-2 py-1 rounded-lg bg-surface-base border border-brand-500/40 text-ink-50 text-sm outline-none"
+                    />
+                  ) : (
+                    <button onClick={() => selectSession(s.id)} className="flex-1 min-w-0 flex items-center gap-3 pl-3 py-2 text-left">
+                      {busyName === s.id ? <Loader2 className="w-4 h-4 animate-spin text-brand-400" /> : <FileText className="w-4 h-4 text-ink-600 shrink-0" />}
+                      <span className="truncate">{s.name || '(untitled)'}</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setMenuFor(menuFor === s.id ? null : s.id)}
+                    className="p-2 mr-1 rounded-lg text-ink-500 hover:text-ink-100 hover:bg-surface-border/60"
+                    aria-label="Chat options"
+                  >
+                    <MoreHorizontal className="w-4 h-4" />
+                  </button>
+                  {menuFor === s.id && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setMenuFor(null)} />
+                      <div className="absolute right-1 top-full mt-1 z-50 w-44 rounded-xl bg-surface-elevated border border-surface-border shadow-glass p-1 slide-in text-ink-200">
+                        <button onClick={() => { setMenuFor(null); setRenaming({ id: s.id, draft: s.name || '' }) }} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Pencil className="w-4 h-4" /> Rename</button>
+                        <button onClick={() => autoName(s.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Wand2 className="w-4 h-4" /> Auto-name with AI</button>
+                        <button onClick={() => removeSession(s.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-danger/15 text-danger text-sm"><Trash2 className="w-4 h-4" /> Delete</button>
+                      </div>
+                    </>
+                  )}
+                </div>
               ))}
               {sessions.filter((s: any) => s.messages > 0).length === 0 && (
                 <div className="px-3 py-2 text-xs text-ink-600 italic">No sessions yet</div>
