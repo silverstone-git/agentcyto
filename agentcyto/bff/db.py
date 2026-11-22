@@ -238,10 +238,16 @@ class DB:
         self._local = threading.local()
         with self.conn() as c:
             c.executescript(SCHEMA)
-            try:  # lightweight migration: KB docs attached to a job
-                c.execute("ALTER TABLE jobs ADD COLUMN kb_docs TEXT")
-            except sqlite3.OperationalError:
-                pass
+            for ddl in (  # lightweight migrations
+                "ALTER TABLE jobs ADD COLUMN kb_docs TEXT",            # KB docs attached to a job
+                "ALTER TABLE jobs ADD COLUMN options TEXT",            # JSON: system_prompt, temperature, byok (no key)
+                "ALTER TABLE messages ADD COLUMN meta TEXT",           # JSON: retrieval hits, trace, thinking
+                "ALTER TABLE messages ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",  # compressed/cleared out of context
+            ):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -293,11 +299,13 @@ class DB:
 
     # -- messages --------------------------------------------------------- #
     def add_message(self, session_id: str, role: str, content: str,
-                    model: str | None = None, job_id: str | None = None) -> None:
+                    model: str | None = None, job_id: str | None = None,
+                    meta: dict | None = None) -> None:
         with self.conn() as c:
             c.execute(
-                "INSERT INTO messages (session_id,role,content,model,created,job_id) VALUES (?,?,?,?,?,?)",
-                (session_id, role, content, model, time.time(), job_id),
+                "INSERT INTO messages (session_id,role,content,model,created,job_id,meta) VALUES (?,?,?,?,?,?,?)",
+                (session_id, role, content, model, time.time(), job_id,
+                 json.dumps(meta, ensure_ascii=False) if meta else None),
             )
             c.execute("UPDATE sessions SET updated=? WHERE id=?", (time.time(), session_id))
 
@@ -305,26 +313,83 @@ class DB:
         """Canonical history sent upstream: system prompts are added by BFF."""
         with self.conn() as c:
             rows = c.execute(
-                "SELECT role, content FROM messages WHERE session_id=? ORDER BY id", (session_id,)
+                "SELECT role, content FROM messages WHERE session_id=? AND archived=0 ORDER BY id",
+                (session_id,),
             ).fetchall()
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+        out = []
+        for r in rows:
+            if r["role"] == "system":  # compression summary (empty content = "cleared" marker)
+                if r["content"].strip():
+                    out.append({"role": "user", "content":
+                                "[Summary of the earlier conversation, for context only]\n" + r["content"]})
+            else:
+                out.append({"role": r["role"], "content": r["content"]})
+        return out
+
+    def archive_messages(self, session_id: str) -> int:
+        with self.conn() as c:
+            cur = c.execute("UPDATE messages SET archived=1 WHERE session_id=? AND archived=0",
+                            (session_id,))
+        return cur.rowcount
+
+    def search_messages(self, q: str, limit: int = 40) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT m.id, m.session_id, m.role, m.content, m.created, s.name AS session_name "
+                "FROM messages m JOIN sessions s ON s.id=m.session_id "
+                "WHERE m.role!='system' AND instr(lower(m.content), ?) > 0 "
+                "ORDER BY m.id DESC LIMIT ?", (q.lower(), limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_sessions(self, q: str, limit: int = 10) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id, name, updated FROM sessions WHERE instr(lower(name), ?) > 0 "
+                "AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id=sessions.id) "
+                "ORDER BY updated DESC LIMIT ?", (q.lower(), limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def get_messages(self, session_id: str) -> list[dict]:
         with self.conn() as c:
             rows = c.execute("SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d["meta"]) if d.get("meta") else None
+            except ValueError:
+                d["meta"] = None
+            out.append(d)
+        return out
+
+    def job_meta(self, job_id: str) -> dict | None:
+        """Retrieval hits / KB trace / thinking of a job, saved with its answer so citations survive reloads."""
+        meta: dict = {"trace": [], "retrieval": None, "thinking": ""}
+        with self.conn() as c:
+            rows = c.execute("SELECT type, data FROM job_events WHERE job_id=? "
+                             "AND type IN ('retrieval','trace','thinking') ORDER BY seq", (job_id,)).fetchall()
+        for row in rows:
+            ev = {"type": row["type"], "data": json.loads(row["data"])}
+            if ev["type"] == "retrieval":
+                meta["retrieval"] = ev["data"]
+            elif ev["type"] == "trace":
+                meta["trace"].append(ev["data"])
+            elif ev["type"] == "thinking":
+                meta["thinking"] += ev["data"].get("text", "")
+        return meta if (meta["trace"] or meta["retrieval"] or meta["thinking"]) else None
 
     # -- jobs ------------------------------------------------------------- #
     def create_job(self, job_id: str, session_id: str, mode: str, role: str,
                    model: str, idempotency_key: str | None,
-                   kb_docs: list[str] | None = None) -> None:
+                   kb_docs: list[str] | None = None, options: dict | None = None) -> None:
         now = time.time()
         with self.conn() as c:
             c.execute(
-                "INSERT INTO jobs (id,session_id,mode,role,model,status,idempotency_key,created,updated,kb_docs) "
-                "VALUES (?,?,?,?,?,'queued',?,?,?,?)",
+                "INSERT INTO jobs (id,session_id,mode,role,model,status,idempotency_key,created,updated,kb_docs,options) "
+                "VALUES (?,?,?,?,?,'queued',?,?,?,?,?)",
                 (job_id, session_id, mode, role, model, idempotency_key, now, now,
-                 json.dumps(kb_docs) if kb_docs else None),
+                 json.dumps(kb_docs) if kb_docs else None,
+                 json.dumps(options) if options else None),
             )
 
     def get_job(self, job_id: str) -> dict | None:

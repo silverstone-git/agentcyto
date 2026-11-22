@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from db import DB, clear_gateway_sessions
 from kb import get_kb, KB
+import byok
 
 KB_SOURCE_DIR = os.environ.get("KB_SOURCE_DIR", "/kb-source")
 KB_INGEST_TIMEOUT = int(os.environ.get("KB_INGEST_TIMEOUT_SECONDS", "3600"))
@@ -46,6 +47,8 @@ SYSTEM_PROMPT = (
 db = DB()
 modes: dict = {}
 _tasks: dict[str, asyncio.Task] = {}
+# BYOK API keys live only here (never in SQLite/events/logs), keyed by job id.
+_byok_keys: dict[str, dict] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -228,7 +231,10 @@ async def run_job(job_id: str) -> None:
     db.update_job(job_id, status="running", attempts=attempts)
     db.add_event(job_id, "status", {"status": "running", "attempt": attempts})
 
+    opts = json.loads(job["options"]) if job.get("options") else {}
     system_prompt = SYSTEM_PROMPT
+    if opts.get("system_prompt"):
+        system_prompt = SYSTEM_PROMPT + "\n\nUser's custom instructions:\n" + opts["system_prompt"]
     kb_ctx = ""
     if job.get("kb_docs"):
         try:
@@ -243,17 +249,21 @@ async def run_job(job_id: str) -> None:
             if m["role"] == "user":
                 m["content"] = f"{kb_ctx}\n\n---\nUser question:\n{m['content']}"
                 break
-    payload = {"model": job["model"], "messages": history, "stream": True}
-    headers = {
-        "Authorization": f"Bearer {MASTER_KEY}",
-        "Content-Type": "application/json",
-        "X-Agentcyto-Session": job["session_id"],
-    }
     text_parts: list[str] = []
     usage: dict | None = None
     resolved: str | None = None
 
-    try:
+    async def gateway_stream():
+        payload = {"model": job["model"], "messages": history, "stream": True}
+        if opts.get("temperature") is not None:
+            payload["temperature"] = opts["temperature"]
+        if opts.get("max_tokens"):
+            payload["max_tokens"] = opts["max_tokens"]
+        headers = {
+            "Authorization": f"Bearer {MASTER_KEY}",
+            "Content-Type": "application/json",
+            "X-Agentcyto-Session": job["session_id"],
+        }
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             async with client.stream(
                 "POST", f"{GATEWAY_URL}/v1/chat/completions", json=payload, headers=headers
@@ -271,35 +281,56 @@ async def run_job(job_id: str) -> None:
                         chunk = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    resolved = chunk.get("model") or resolved
+                    if chunk.get("model"):
+                        yield "model", chunk["model"]
                     if chunk.get("usage"):
-                        usage = chunk["usage"]
+                        yield "usage", chunk["usage"]
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
                     think = delta.get("reasoning_content") or delta.get("reasoning")
                     if think:
-                        db.add_event(job_id, "thinking", {"text": think, "attempt": attempts})
-                    text = delta.get("content")
-                    if text:
-                        text_parts.append(text)
-                        db.add_event(job_id, "delta", {"text": text, "attempt": attempts})
+                        yield "thinking", think
+                    if delta.get("content"):
+                        yield "delta", delta["content"]
+
+    async def byok_stream():
+        cfg = _byok_keys.get(job_id)
+        if not cfg:
+            raise RuntimeError("custom-provider credentials are no longer available "
+                               "(server restarted); please resend the message")
+        async for item in byok.stream_chat(cfg, history, opts.get("temperature"), opts.get("max_tokens")):
+            yield item
+
+    try:
+        async for kind, val in (byok_stream() if opts.get("byok") else gateway_stream()):
+            if kind == "model":
+                resolved = val
+            elif kind == "usage":
+                usage = val
+            elif kind == "thinking":
+                db.add_event(job_id, "thinking", {"text": val, "attempt": attempts})
+            elif kind == "delta":
+                text_parts.append(val)
+                db.add_event(job_id, "delta", {"text": val, "attempt": attempts})
 
         reply = "".join(text_parts)
         if not reply.strip():
             raise RuntimeError("gateway returned an empty reply")
 
-        db.add_message(job["session_id"], "assistant", reply, resolved, job_id)
+        db.add_message(job["session_id"], "assistant", reply, resolved, job_id, db.job_meta(job_id))
         db.record_usage(job_id, job["session_id"], job["model"], resolved,
                         int((usage or {}).get("prompt_tokens") or 0),
                         int((usage or {}).get("completion_tokens") or 0),
-                        estimate_cost(resolved or job["model"], usage))
+                        0.0 if opts.get("byok") else estimate_cost(resolved or job["model"], usage))
         db.update_job(job_id, status="done", resolved_model=resolved, error=None)
         db.add_event(job_id, "done", {
             "text": reply, "model": resolved, "usage": usage, "attempt": attempts,
         })
+        _byok_keys.pop(job_id, None)
     except asyncio.CancelledError:
+        _byok_keys.pop(job_id, None)
         db.update_job(job_id, status="cancelled", error="cancelled by client")
         db.add_event(job_id, "status", {"status": "cancelled", "attempt": attempts})
         raise
@@ -312,6 +343,7 @@ async def run_job(job_id: str) -> None:
             await asyncio.sleep(min(2 ** attempts, 10))
             schedule(job_id)
         else:
+            _byok_keys.pop(job_id, None)
             db.update_job(job_id, status="blocked", error=error)
             db.add_event(job_id, "job_error", {"error": error, "attempt": attempts})
 
@@ -369,6 +401,20 @@ class ChatRequest(BaseModel):
     idempotency_key: str | None = None
     kb_docs: list[str] | None = None
     reply_to: dict | None = None  # {"role": "user"|"assistant", "content": str}
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1, le=200_000)
+    byok: dict | None = None  # {api_type, base_url, api_key, model, label}: user's own provider
+
+
+class CompressRequest(BaseModel):
+    action: str = "summarize"  # "summarize" | "clear"
+    model: str | None = None   # chat alias for the summary (default: light)
+    byok: dict | None = None
+
+
+class ByokModelsRequest(BaseModel):
+    byok: dict
 
 
 class SessionRequest(BaseModel):
@@ -484,7 +530,24 @@ async def delete_session(session_id: str):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    alias, _cfg = resolve_job_model(req.mode, req.role, req.model)
+    options: dict = {}
+    if req.byok:
+        if req.role == "agent":
+            raise HTTPException(400, "custom providers support chat only, not agent mode")
+        try:
+            cfg = await byok.validate_cfg(req.byok)
+        except byok.ByokError as exc:
+            raise HTTPException(400, str(exc))
+        alias = f"byok:{cfg['model']}"[:120]
+        options["byok"] = {k: cfg[k] for k in ("api_type", "base_url", "model", "label")}
+    else:
+        alias, _cfg = resolve_job_model(req.mode, req.role, req.model)
+    if req.system_prompt and req.system_prompt.strip():
+        options["system_prompt"] = req.system_prompt.strip()
+    if req.temperature is not None:
+        options["temperature"] = req.temperature
+    if req.max_tokens:
+        options["max_tokens"] = req.max_tokens
     session_id = check_session(req.session_id) if req.session_id else uuid.uuid4().hex
     if not db.get_session(session_id):
         db.create_session(session_id, " ".join((req.name or req.message).split())[:48])
@@ -495,7 +558,7 @@ async def chat(req: ChatRequest):
             return {"job_id": existing["id"], "session_id": session_id,
                     "model": existing["model"], "status": existing["status"]}
 
-    if req.role == "agent" or "-agent" in alias:
+    if not req.byok and (req.role == "agent" or "-agent" in alias):
         ensure_workspace(session_id)
     user_text = req.message
     if req.reply_to and isinstance(req.reply_to.get("content"), str):
@@ -506,9 +569,112 @@ async def chat(req: ChatRequest):
 
     job_id = uuid.uuid4().hex
     db.create_job(job_id, session_id, req.mode, req.role, alias, req.idempotency_key,
-                  [d for d in (req.kb_docs or []) if re.fullmatch(r'[\w\-.]{1,120}', d)][:20])
+                  [d for d in (req.kb_docs or []) if re.fullmatch(r'[\w\-.]{1,120}', d)][:20],
+                  options or None)
+    if req.byok:
+        _byok_keys[job_id] = cfg
     schedule(job_id)
     return {"job_id": job_id, "session_id": session_id, "model": alias, "status": "queued"}
+
+
+@app.get("/api/search")
+async def search(q: str = "", limit: int = 40):
+    """Universal search over every chat's title and message text."""
+    q = " ".join(q.split())
+    if len(q) < 2:
+        return {"query": q, "results": []}
+    limit = max(1, min(limit, 100))
+    results = []
+    for s_ in db.search_sessions(q, 8):
+        results.append({"kind": "session", "session_id": s_["id"], "session_name": s_["name"],
+                        "snippet": "", "updated": s_["updated"]})
+    low = q.lower()
+    for m in db.search_messages(q, limit):
+        text = " ".join(m["content"].split())
+        i = text.lower().find(low)
+        a = max(0, i - 60)
+        snippet = ("…" if a else "") + text[a:i + len(q) + 120] + ("…" if i + len(q) + 120 < len(text) else "")
+        results.append({"kind": "message", "session_id": m["session_id"], "session_name": m["session_name"],
+                        "message_id": m["id"], "role": m["role"], "snippet": snippet,
+                        "match": text[i:i + len(q)], "updated": m["created"]})
+    return {"query": q, "results": results}
+
+
+@app.post("/api/sessions/{session_id}/compress")
+async def compress_session(session_id: str, req: CompressRequest):
+    """Summarise the live context into one note ("summarize") or drop it ("clear").
+
+    Old messages stay visible in the UI (archived) but are no longer sent upstream.
+    Native CLI sessions are reset too so they do not keep the old context.
+    """
+    check_session(session_id)
+    if not db.get_session(session_id):
+        raise HTTPException(404, "session not found")
+    if req.action not in ("summarize", "clear"):
+        raise HTTPException(400, "action must be 'summarize' or 'clear'")
+    if any(j["status"] in ("queued", "running", "partial") for j in db.jobs_for_session(session_id, 5)):
+        raise HTTPException(409, "wait for the current reply to finish first")
+    live = db.get_history(session_id)
+    if not live:
+        raise HTTPException(400, "no live context to compress")
+
+    summary = ""
+    if req.action == "summarize":
+        parts, budget = [], 60_000
+        for m in reversed(live):  # keep the newest material when over budget
+            chunk = f"{m['role'].upper()}: {m['content'][:6000]}"
+            if budget - len(chunk) < 0:
+                break
+            budget -= len(chunk)
+            parts.append(chunk)
+        convo = "\n\n".join(reversed(parts))
+        prompt = ("Compress the conversation below into a dense note that lets an assistant continue it "
+                  "seamlessly. Keep: the user's goals and preferences, decisions made, key facts, names, "
+                  "numbers, equations, code or commands that matter, and unresolved questions. Drop "
+                  "pleasantries and repetition. Write plain text or short bullet points, no preamble.\n\n"
+                  "=== CONVERSATION ===\n" + convo)
+        try:
+            if req.byok:
+                cfg = await byok.validate_cfg(req.byok)
+                summary = await byok.complete(cfg, [{"role": "user", "content": prompt}])
+            else:
+                model = req.model or "light"
+                if model not in (modes.get("chat_models") or []):
+                    raise HTTPException(400, f"model '{model}' is not allowed")
+                async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10)) as client:
+                    resp = await client.post(
+                        f"{GATEWAY_URL}/v1/chat/completions",
+                        json={"model": model, "stream": False,
+                              "messages": [{"role": "user", "content": prompt}]},
+                        headers={"Authorization": f"Bearer {MASTER_KEY}", "Content-Type": "application/json"})
+                resp.raise_for_status()
+                summary = resp.json()["choices"][0]["message"]["content"]
+        except HTTPException:
+            raise
+        except byok.ByokError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"compression failed: {str(exc)[:200]}")
+        summary = summary.strip()
+        if not summary:
+            raise HTTPException(502, "compression returned an empty summary")
+
+    archived = db.archive_messages(session_id)
+    db.add_message(session_id, "system", summary)
+    clear_gateway_sessions(session_id)
+    return {"status": "ok", "action": req.action, "archived": archived, "summary": summary}
+
+
+@app.post("/api/byok/models")
+async def byok_models(req: ByokModelsRequest):
+    """List the models a user-supplied provider exposes (also doubles as a key check)."""
+    try:
+        cfg = await byok.validate_cfg(req.byok, need_model=False)
+        return {"models": await byok.list_models(cfg)}
+    except byok.ByokError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"could not reach provider: {str(exc)[:200]}")
 
 
 @app.get("/api/jobs/{job_id}")

@@ -1,7 +1,12 @@
 import { PREFIX } from '../lib/prefix'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen, MoreHorizontal, Pencil, Trash2, Wand2 } from 'lucide-react'
-import { api, Message, Session } from '../lib/api'
+import { createPortal } from 'react-dom'
+import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen, MoreHorizontal, Pencil, Trash2, Wand2, MessageSquare, Search, SlidersHorizontal, Shrink, Eraser, KeyRound } from 'lucide-react'
+import { api, Message, Session, ModesConfig, SearchResult } from '../lib/api'
+import { ChatSettings, Provider, byokPayload, loadProviders, loadSettings, saveProviders, saveSettings } from '../lib/providers'
+import ModelMenu from '../components/chat/ModelMenu'
+import SearchModal from '../components/chat/SearchModal'
+import ProvidersModal from '../components/chat/ProvidersModal'
 import MessageBubble from '../components/chat/MessageBubble'
 import Trace, { Turn, emptyTurn } from '../components/chat/Trace'
 import { MenuButton } from '../components/layout/nav'
@@ -19,9 +24,16 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [mode, setMode] = useState<string>('heavy')
-  const [role, setRole] = useState<'chat' | 'agent'>('chat')
-  const [model, setModel] = useState<string>('')
+  const [settings, setSettingsState] = useState<ChatSettings>(loadSettings)
+  const [providers, setProvidersState] = useState<Provider[]>(loadProviders)
+  const [modesCfg, setModesCfg] = useState<ModesConfig | null>(null)
+  const { mode, role, model } = settings
+  const provider = providers.find((p) => p.id === settings.providerId) || null
+  const [popup, setPopup] = useState<'model' | 'ctx' | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [providersOpen, setProvidersOpen] = useState(false)
+  const [ctxBusy, setCtxBusy] = useState<'summarize' | 'clear' | null>(null)
+  const formRef = useRef<HTMLFormElement>(null)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [attempt, setAttempt] = useState<number | null>(null)
@@ -31,7 +43,7 @@ export default function ChatPage() {
   const [panelOpen, setPanelOpen] = useState(false)
   const [replyTo, setReplyTo] = useState<{ role: 'user' | 'assistant'; content: string } | null>(null)
   const [kbMenu, setKbMenu] = useState(false)
-  const [menuFor, setMenuFor] = useState<string | null>(null)
+  const [menuFor, setMenuFor] = useState<{ id: string; top: number; left: number; up: boolean } | null>(null)
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null)
   const [busyName, setBusyName] = useState<string | null>(null)
   const [citeHit, setCiteHit] = useState<any | null>(null)
@@ -76,14 +88,32 @@ export default function ChatPage() {
     }
   }, [log])
 
+  const patchSettings = useCallback((patch: Partial<ChatSettings>) => {
+    setSettingsState((prev) => { const next = { ...prev, ...patch }; saveSettings(next); return next })
+  }, [])
+  const setProviders = (next: Provider[]) => {
+    setProvidersState(next); saveProviders(next)
+    if (settings.providerId && !next.some((p) => p.id === settings.providerId)) patchSettings({ providerId: '' })
+  }
+
+  // Close composer popups when clicking outside the composer.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (formRef.current && !formRef.current.contains(e.target as Node)) { setPopup(null); setKbMenu(false) }
+    }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [])
+
   const loadModes = useCallback(async () => {
     try {
       const cfg = await api.modes()
-      setMode(cfg.default_mode || 'heavy')
+      setModesCfg(cfg)
+      try { if (!localStorage.getItem('agentcyto.settings')) patchSettings({ mode: cfg.default_mode || 'heavy' }) } catch (_) { /* ignore */ }
     } catch (err: any) {
       log('err', 'Failed to load modes', err.message)
     }
-  }, [log])
+  }, [log, patchSettings])
 
   const loadKBDocs = useCallback(async () => {
     setKbLoading(true)
@@ -139,7 +169,7 @@ export default function ChatPage() {
     } catch (err: any) { log('err', 'Delete failed', err.message) }
   }
 
-  const selectSession = async (id: string) => {
+  const selectSession = async (id: string, focusMsg?: number) => {
     setPanelOpen(false)
     setError(null)
     setAttempt(null)
@@ -147,7 +177,7 @@ export default function ChatPage() {
     try {
       const detail = await api.getSession(id)
       setMessages(detail.messages || [])
-      setRole((detail.jobs?.[0]?.role === 'agent' ? 'agent' : 'chat') as 'chat' | 'agent')
+      if (!provider) patchSettings({ role: detail.jobs?.[0]?.role === 'agent' ? 'agent' : 'chat' })
       setInput('')
       activeJobRef.current = null
       const active = detail.jobs?.find((j: any) => ['queued', 'running', 'partial'].includes(j.status))
@@ -157,7 +187,14 @@ export default function ChatPage() {
         startedAtRef.current = Date.now()
         // resume stream handled by useSSEStream
       }
-      scrollToBottom()
+      if (focusMsg) {
+        setTimeout(() => {
+          const el = document.getElementById(`msg-${focusMsg}`)
+          el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el?.classList.add('flash-hit')
+          setTimeout(() => el?.classList.remove('flash-hit'), 2200)
+        }, 120)
+      }
     } catch (err: any) {
       log('err', 'Failed to load session', err.message)
       setError(err.message)
@@ -211,6 +248,35 @@ export default function ChatPage() {
     setLive(liveRef.current)
   }
 
+  const buildBody = (text: string) => {
+    const body: any = { message: text, mode, role, kb_docs: Array.from(attachedKb) }
+    if (sessionId) body.session_id = sessionId
+    if (settings.systemPrompt.trim()) body.system_prompt = settings.systemPrompt.trim()
+    if (settings.temperature !== null) body.temperature = settings.temperature
+    if (settings.maxTokens) body.max_tokens = settings.maxTokens
+    if (provider) { body.byok = byokPayload(provider); body.role = 'chat' }
+    else if (model) body.model = model
+    return body
+  }
+
+  const runCompress = async (action: 'summarize' | 'clear') => {
+    if (!sessionId || ctxBusy) return
+    if (action === 'clear' && !window.confirm('Clear the context? The model will forget this conversation (messages stay visible above).')) return
+    setCtxBusy(action)
+    try {
+      const body: any = { action }
+      if (provider) body.byok = byokPayload(provider)
+      const r = await api.compressSession(sessionId, body)
+      const detail = await api.getSession(sessionId)
+      setMessages(detail.messages || [])
+      log('ok', action === 'clear' ? 'Context cleared' : 'Context compressed', `${r.archived} message(s) archived`)
+      setPopup(null)
+    } catch (err: any) {
+      setError(err.message)
+      log('err', action === 'clear' ? 'Clear failed' : 'Compress failed', err.message)
+    } finally { setCtxBusy(null) }
+  }
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     const text = input.trim()
@@ -232,18 +298,12 @@ export default function ChatPage() {
     setReplyTo(null)
     inputRef.current?.focus()
 
-    log('info', 'Message queued', `mode: ${mode} · role: ${role}` + (attachedKb.size ? ` · KB: ${attachedKb.size} repo(s)` : ''))
+    log('info', 'Message queued', (provider ? `custom: ${provider.label}/${provider.model}` : `mode: ${mode} · role: ${role}`) + (attachedKb.size ? ` · KB: ${attachedKb.size} repo(s)` : ''))
 
+    setPopup(null)
     try {
-      const body: any = {
-        message: text,
-        mode,
-        role,
-        kb_docs: Array.from(attachedKb),
-      }
+      const body = buildBody(text)
       if (replyTo) body.reply_to = replyTo
-      if (sessionId) body.session_id = sessionId
-      if (model) body.model = model
 
       const job = await api.chat(body)
       activeJobRef.current = job.job_id
@@ -274,13 +334,7 @@ export default function ChatPage() {
     setStreaming(true)
     startedAtRef.current = Date.now()
     try {
-      const body: any = {
-        message: messages[messages.length - 1]?.content || '',
-        mode,
-        role,
-        kb_docs: Array.from(attachedKb),
-      }
-      if (sessionId) body.session_id = sessionId
+      const body = buildBody(messages[messages.length - 1]?.content || '')
       const job = await api.chat(body)
       activeJobRef.current = job.job_id
       resetLive()
@@ -396,6 +450,21 @@ export default function ChatPage() {
     }
   }
 
+  const pickSearch = (r: SearchResult) => {
+    setSearchOpen(false)
+    selectSession(r.session_id, r.message_id)
+  }
+
+  const openSessionMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string) => {
+    if (menuFor?.id === id) { setMenuFor(null); return }
+    const r = e.currentTarget.getBoundingClientRect()
+    const menuH = 150, menuW = 176
+    const up = window.innerHeight - r.bottom < menuH + 12
+    setMenuFor({ id, up, top: up ? r.top - 4 : r.bottom + 4, left: Math.max(8, Math.min(r.right - menuW, window.innerWidth - menuW - 8)) })
+  }
+
+  const ctxTokens = Math.round(messages.filter((m) => !m.archived).reduce((n, m) => n + m.content.length, 0) / 4)
+
   const toggleLog = () => setLogOpen(!logOpen)
 
   return (
@@ -406,9 +475,10 @@ export default function ChatPage() {
           <button
             onClick={() => setPanelOpen(!panelOpen)}
             className="p-2 rounded-xl hover:bg-surface-border text-ink-400 transition-colors md:hidden"
-            title="Sessions & knowledge base"
+            title="Chat history"
+            aria-label="Chat history"
           >
-            <span className="text-lg leading-none">☷</span>
+            <MessageSquare className="w-5 h-5" />
           </button>
           <button
             onClick={newSession}
@@ -417,40 +487,6 @@ export default function ChatPage() {
           >
             <Plus className="w-5 h-5" />
           </button>
-          <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-surface-base border border-surface-border">
-            <span className="text-xs text-ink-500">Mode</span>
-            <select
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              className="bg-transparent text-xs text-ink-100 border-none focus:ring-0 px-1 cursor-pointer appearance-none"
-            >
-              {['heavy', 'heavy-tool', 'light', 'light-tool'].map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-            <span className="text-xs text-ink-500">Role</span>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value as any)}
-              className="bg-transparent text-xs text-ink-100 border-none focus:ring-0 px-1 cursor-pointer appearance-none"
-            >
-              <option value="chat">Chat</option>
-              <option value="agent">Agent</option>
-            </select>
-            {model && (
-              <>
-                <span className="text-xs text-ink-500">Model</span>
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="bg-transparent text-xs text-ink-100 border-none focus:ring-0 px-1 cursor-pointer appearance-none"
-                >
-                  <option value={model}>{model}</option>
-                  <option value="">auto</option>
-                </select>
-              </>
-            )}
-          </div>
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden md:block text-xs text-ink-500">{sessionId ? sessionId.slice(0, 12) : 'New session'}</span>
@@ -470,19 +506,27 @@ export default function ChatPage() {
       </header>
 
       <div className="flex flex-1 overflow-hidden relative">
-        {/* Session list sidebar */}
-        <aside className={`${panelOpen ? 'flex' : 'hidden'} md:flex absolute md:static inset-y-0 left-0 w-[85%] max-w-xs md:w-72 shrink-0 min-h-0 overflow-hidden bg-surface-elevated md:bg-surface-elevated/60 md:backdrop-blur-xl border-r border-surface-border flex-col z-40`}>
-          <div className="p-4 border-b max-h-[45%] overflow-y-auto ink-scroll shrink-0 border-b border-surface-border">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-ink-200">Sessions</h2>
+        {/* Session history sidebar: slides in on mobile, static on desktop */}
+        <aside className={`absolute md:static inset-y-0 left-0 w-[85%] max-w-xs md:w-72 shrink-0 min-h-0 overflow-hidden bg-surface-elevated md:bg-surface-elevated/60 md:backdrop-blur-xl border-r border-surface-border flex flex-col z-40 transition-[transform,visibility] duration-300 ease-out md:visible md:translate-x-0 ${panelOpen ? 'translate-x-0 visible' : '-translate-x-full invisible'}`}>
+          <div className="p-3 pb-2 shrink-0 space-y-2">
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-surface-base border border-surface-border text-sm text-ink-500 hover:text-ink-200 hover:border-ink-700 transition-colors"
+            >
+              <Search className="w-4 h-4" /> <span className="flex-1 text-left">Search chats</span>
+            </button>
+            <div className="flex items-center justify-between px-1 pt-1">
+              <h2 className="text-sm font-semibold text-ink-200">Chats</h2>
               <button
                 onClick={newSession}
                 className="p-1.5 rounded-lg hover:bg-surface-border text-ink-400 transition-colors"
-                title="New session"
+                title="New chat"
               >
                 <Plus className="w-4 h-4" />
               </button>
             </div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto ink-scroll px-3 pb-3">
             <div className="space-y-1">
               {sessions.filter((s: any) => s.messages > 0 || s.id === sessionId).map((s) => (
                 <div
@@ -509,89 +553,35 @@ export default function ChatPage() {
                     </button>
                   )}
                   <button
-                    onClick={() => setMenuFor(menuFor === s.id ? null : s.id)}
+                    onClick={(e) => openSessionMenu(e, s.id)}
                     className="p-2 mr-1 rounded-lg text-ink-500 hover:text-ink-100 hover:bg-surface-border/60"
                     aria-label="Chat options"
                   >
                     <MoreHorizontal className="w-4 h-4" />
                   </button>
-                  {menuFor === s.id && (
-                    <>
-                      <div className="fixed inset-0 z-40" onClick={() => setMenuFor(null)} />
-                      <div className="absolute right-1 top-full mt-1 z-50 w-44 rounded-xl bg-surface-elevated border border-surface-border shadow-glass p-1 slide-in text-ink-200">
-                        <button onClick={() => { setMenuFor(null); setRenaming({ id: s.id, draft: s.name || '' }) }} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Pencil className="w-4 h-4" /> Rename</button>
-                        <button onClick={() => autoName(s.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Wand2 className="w-4 h-4" /> Auto-name with AI</button>
-                        <button onClick={() => removeSession(s.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-danger/15 text-danger text-sm"><Trash2 className="w-4 h-4" /> Delete</button>
-                      </div>
-                    </>
-                  )}
                 </div>
               ))}
               {sessions.filter((s: any) => s.messages > 0).length === 0 && (
-                <div className="px-3 py-2 text-xs text-ink-600 italic">No sessions yet</div>
+                <div className="px-3 py-2 text-xs text-ink-600 italic">No chats yet</div>
               )}
             </div>
           </div>
-
-          {/* KB attach panel */}
-          <div className="flex-1 p-4 overflow-y-auto ink-scroll">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-ink-200">Knowledge base</h2>
-              {kbDocs.length > 0 && (
-                <div className="flex gap-1">
-                  <button
-                    onClick={attachAllKB}
-                    className="px-2 py-1 rounded-lg text-[10px] bg-surface-border text-ink-300 hover:bg-surface-border/50 hover:text-ink-100 transition-colors"
-                    title="Attach all"
-                  >
-                    All
-                  </button>
-                  <button
-                    onClick={detachAllKB}
-                    className="px-2 py-1 rounded-lg text-[10px] bg-surface-border text-ink-300 hover:bg-surface-border/50 hover:text-ink-100 transition-colors"
-                    title="Detach all"
-                  >
-                    None
-                  </button>
-                </div>
-              )}
-            </div>
-            {kbLoading ? (
-              <div className="flex items-center justify-center py-4 text-xs text-ink-500">
-                <Loader2 className="w-3 h-3 animate-spin mr-1" /> Loading…
-              </div>
-            ) : kbDocs.length === 0 ? (
-              <div className="px-3 py-4 text-xs text-ink-600 text-center italic">
-                No KB documents ingested yet. Use Admin → Ingest to load the knowledge base.
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {kbDocs.map((d) => {
-                  const attached = attachedKb.has(d.id)
-                  return (
-                    <button
-                      key={d.id}
-                      onClick={() => toggleKB(d.id)}
-                      className={`w-full text-left flex items-center justify-between gap-3 px-3 py-2 rounded-xl text-sm transition-colors ${
-                        attached
-                          ? 'bg-brand-500/10 text-brand-400 border border-brand-500/20'
-                          : 'text-ink-400 hover:bg-surface-border hover:text-ink-100'
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <span className="block truncate">{d.title || d.file_name}</span>
-                        <span className="text-[10px] text-ink-600">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
-                      </div>
-                      <span className={`w-2 h-2 shrink-0 rounded-full ${attached ? 'bg-brand-500' : 'bg-surface-border'}`} />
-                    </button>
-                  )
-                })}
-              </div>
-            )}
+          <div className="shrink-0 p-3 border-t border-surface-border">
+            <button
+              onClick={() => setProvidersOpen(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm text-ink-300 hover:bg-surface-border hover:text-ink-50 transition-colors"
+            >
+              <KeyRound className="w-4 h-4 text-ink-500" />
+              <span className="flex-1 text-left">Bring your own key</span>
+              {providers.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-border text-ink-400">{providers.length}</span>}
+            </button>
           </div>
         </aside>
 
-        {panelOpen && <div className="md:hidden absolute inset-0 z-30 bg-black/50" onClick={() => setPanelOpen(false)} />}
+        <div
+          className={`md:hidden absolute inset-0 z-30 bg-black/50 transition-opacity duration-300 ${panelOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          onClick={() => setPanelOpen(false)}
+        />
 
         {/* Main chat area */}
         <main className="flex-1 flex flex-col min-w-0 bg-surface-base">
@@ -602,8 +592,19 @@ export default function ChatPage() {
                 <p className="text-sm">Start a conversation.</p>
               </div>
             )}
-            {messages.map((msg, i) => (
-              <div key={i} className="mb-6">
+            {messages.map((msg, i) => msg.role === 'system' ? (
+              <div key={i} id={msg.id ? `msg-${msg.id}` : undefined} className="mb-6 flex items-start gap-3 text-[11px] text-ink-500">
+                <div className="h-px flex-1 bg-surface-border mt-2" />
+                {msg.content.trim() ? (
+                  <details className="max-w-[80%] group">
+                    <summary className="cursor-pointer list-none text-center hover:text-ink-300">Earlier context compressed · view summary</summary>
+                    <div className="mt-2 p-3 rounded-xl bg-surface-card border border-surface-border text-ink-300 text-xs whitespace-pre-wrap">{msg.content}</div>
+                  </details>
+                ) : <span>Context cleared</span>}
+                <div className="h-px flex-1 bg-surface-border mt-2" />
+              </div>
+            ) : (
+              <div key={i} id={msg.id ? `msg-${msg.id}` : undefined} className={`mb-6 rounded-2xl transition-shadow ${msg.archived ? 'opacity-50' : ''}`}>
                 {msg.role === 'assistant' && msg.meta && (msg.meta.trace?.length > 0 || msg.meta.thinking) && (
                   <Trace turn={{ text: msg.content, thinking: msg.meta.thinking || '', trace: msg.meta.trace || [], retrieval: msg.meta.retrieval || null }} />
                 )}
@@ -642,7 +643,7 @@ export default function ChatPage() {
 
           {/* Composer */}
           <div className="glass border-t border-surface-border p-2 md:p-4">
-            <form onSubmit={sendMessage} className="max-w-4xl mx-auto relative rounded-2xl border border-surface-border bg-surface-card">
+            <form ref={formRef} onSubmit={sendMessage} className="max-w-4xl mx-auto relative rounded-2xl border border-surface-border bg-surface-card">
               {replyTo && (
                 <div className="px-2 pt-2"><QuoteChip who={replyTo.role} quote={replyTo.content} onClear={() => setReplyTo(null)} /></div>
               )}
@@ -666,7 +667,7 @@ export default function ChatPage() {
               <div className="relative shrink-0">
                 <button
                   type="button"
-                  onClick={() => setKbMenu(!kbMenu)}
+                  onClick={() => { setPopup(null); setKbMenu(!kbMenu) }}
                   className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${attachedKb.size ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
                   title="Attach knowledge base"
                   aria-label="Attach knowledge base"
@@ -675,7 +676,6 @@ export default function ChatPage() {
                 </button>
                 {kbMenu && (
                   <>
-                    <div className="fixed inset-0 z-40" onClick={() => setKbMenu(false)} />
                     <div className="absolute bottom-12 left-0 z-50 w-72 max-w-[80vw] max-h-72 overflow-y-auto ink-scroll rounded-2xl bg-surface-elevated border border-surface-border shadow-glass p-2 slide-in">
                       <div className="flex items-center justify-between px-2 py-1">
                         <span className="text-xs font-semibold text-ink-200">Knowledge base</span>
@@ -684,7 +684,8 @@ export default function ChatPage() {
                           <button type="button" onClick={detachAllKB} className="px-2 py-0.5 rounded-lg text-[10px] bg-surface-border text-ink-300">None</button>
                         </span>
                       </div>
-                      {kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents ingested yet.</div>}
+                      {kbLoading && <div className="px-2 py-3 text-xs text-ink-500 flex items-center"><Loader2 className="w-3 h-3 animate-spin mr-1" /> Loading…</div>}
+                      {!kbLoading && kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents ingested yet.</div>}
                       {kbDocs.map((d) => {
                         const on = attachedKb.has(d.id)
                         return (
@@ -717,7 +718,26 @@ export default function ChatPage() {
                 }}
                 style={{ minHeight: '40px', maxHeight: '200px', height: input ? Math.min(200, Math.max(40, inputRef.current?.scrollHeight || 40)) : 40 }}
               />
-              <div className="flex items-center shrink-0">
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => { setKbMenu(false); setPopup(popup === 'ctx' ? null : 'ctx') }}
+                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${popup === 'ctx' ? 'bg-surface-border text-ink-50' : 'text-ink-400 hover:bg-surface-border'}`}
+                  title="Context: compress or clear"
+                  aria-label="Context: compress or clear"
+                >
+                  <Shrink className="w-[18px] h-[18px]" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setKbMenu(false); setPopup(popup === 'model' ? null : 'model') }}
+                  className={`h-10 rounded-xl flex items-center justify-center gap-1.5 px-2.5 transition-colors ${popup === 'model' || provider ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
+                  title="Model & prompt settings"
+                  aria-label="Model & prompt settings"
+                >
+                  <SlidersHorizontal className="w-[18px] h-[18px] shrink-0" />
+                  <span className="hidden md:block max-w-[8rem] truncate text-xs">{provider ? provider.model || provider.label : model || (modesCfg?.modes[mode]?.label ?? mode)}</span>
+                </button>
                 {!streaming ? (
                   <button
                     type="submit"
@@ -737,12 +757,66 @@ export default function ChatPage() {
                 )}
               </div>
               </div>
+              {popup === 'model' && (
+                <div className="absolute bottom-full mb-2 right-0 left-0 sm:left-auto sm:w-[26rem] z-50 max-h-[70vh] overflow-y-auto ink-scroll rounded-2xl bg-surface-elevated border border-surface-border shadow-glass p-4 slide-in">
+                  <ModelMenu
+                    settings={settings}
+                    onChange={patchSettings}
+                    modes={modesCfg}
+                    providers={providers}
+                    onProviderModel={(id, m) => setProviders(providers.map((p) => (p.id === id ? { ...p, model: m } : p)))}
+                    onManageProviders={() => { setPopup(null); setProvidersOpen(true) }}
+                  />
+                </div>
+              )}
+              {popup === 'ctx' && (
+                <div className="absolute bottom-full mb-2 right-0 left-0 sm:left-auto sm:w-80 z-50 rounded-2xl bg-surface-elevated border border-surface-border shadow-glass p-3 slide-in space-y-2">
+                  <div className="px-1 text-xs text-ink-400">
+                    {sessionId ? <>Live context: <span className="text-ink-100">~{ctxTokens.toLocaleString()} tokens</span></> : 'Start a chat to manage its context.'}
+                  </div>
+                  <button type="button" disabled={!sessionId || streaming || !!ctxBusy || ctxTokens === 0} onClick={() => runCompress('summarize')}
+                    className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl text-left hover:bg-surface-border disabled:opacity-40 disabled:hover:bg-transparent">
+                    {ctxBusy === 'summarize' ? <Loader2 className="w-4 h-4 mt-0.5 animate-spin" /> : <Shrink className="w-4 h-4 mt-0.5 text-brand-400" />}
+                    <span><span className="block text-sm text-ink-100">Compress context</span><span className="block text-[11px] text-ink-500">Summarize everything so far into one short note and free up the window.</span></span>
+                  </button>
+                  <button type="button" disabled={!sessionId || streaming || !!ctxBusy || ctxTokens === 0} onClick={() => runCompress('clear')}
+                    className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl text-left hover:bg-danger/10 disabled:opacity-40 disabled:hover:bg-transparent">
+                    {ctxBusy === 'clear' ? <Loader2 className="w-4 h-4 mt-0.5 animate-spin" /> : <Eraser className="w-4 h-4 mt-0.5 text-danger" />}
+                    <span><span className="block text-sm text-ink-100">Clear context</span><span className="block text-[11px] text-ink-500">Make the model forget this chat. Messages stay visible but are no longer sent.</span></span>
+                  </button>
+                </div>
+              )}
             </form>
           </div>
         </main>
       </div>
 
       {citeHit && <CitationModal hit={citeHit} onClose={() => setCiteHit(null)} />}
+      {searchOpen && <SearchModal onClose={() => setSearchOpen(false)} onPick={pickSearch} />}
+      {providersOpen && (
+        <ProvidersModal
+          providers={providers}
+          onChange={setProviders}
+          onUse={(id) => patchSettings({ providerId: id, role: 'chat' })}
+          onClose={() => setProvidersOpen(false)}
+        />
+      )}
+
+      {/* Per-chat menu is portalled to <body> so the scrolling list can't clip it; flips upward near the bottom. */}
+      {menuFor && createPortal(
+        <>
+          <div className="fixed inset-0 z-[95]" onClick={() => setMenuFor(null)} />
+          <div
+            className="fixed z-[96] w-44 rounded-xl bg-surface-elevated border border-surface-border shadow-glass p-1 slide-in text-ink-200"
+            style={{ left: menuFor.left, ...(menuFor.up ? { bottom: window.innerHeight - menuFor.top } : { top: menuFor.top }) }}
+          >
+            <button onClick={() => { const id = menuFor.id; const sn = sessions.find((x) => x.id === id); setMenuFor(null); setRenaming({ id, draft: sn?.name || '' }) }} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Pencil className="w-4 h-4" /> Rename</button>
+            <button onClick={() => autoName(menuFor.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-surface-border text-sm"><Wand2 className="w-4 h-4" /> Auto-name with AI</button>
+            <button onClick={() => removeSession(menuFor.id)} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-danger/15 text-danger text-sm"><Trash2 className="w-4 h-4" /> Delete</button>
+          </div>
+        </>,
+        document.body,
+      )}
 
       {/* System log drawer */}
       <div className="shrink-0 z-30">

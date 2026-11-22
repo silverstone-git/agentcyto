@@ -50,6 +50,19 @@ export interface Message {
   content: string
   model?: string | null
   meta?: any
+  id?: number
+  archived?: number
+}
+
+export interface SearchResult {
+  kind: 'session' | 'message'
+  session_id: string
+  session_name: string
+  message_id?: number
+  role?: string
+  snippet: string
+  match?: string
+  updated: number
 }
 
 export interface Job {
@@ -160,6 +173,11 @@ export const api = {
     apiPatch(`sessions/${id}`, { name }) as Promise<SessionDetail>,
   autonameSession: (id: string) => apiPost(`sessions/${id}/autoname`, {}) as Promise<Session>,
   deleteSession: (id: string) => apiDelete(`sessions/${id}`),
+
+  search: (q: string) => apiGet(`search?q=${encodeURIComponent(q)}`) as Promise<{ query: string; results: SearchResult[] }>,
+  compressSession: (id: string, body: { action: 'summarize' | 'clear'; model?: string; byok?: any }) =>
+    apiPost(`sessions/${id}/compress`, body) as Promise<{ status: string; archived: number; summary: string }>,
+  byokModels: (byok: any) => apiPost('byok/models', { byok }) as Promise<{ models: string[] }>,
 
   chat: (body: any) => apiPost('chat', body),
   getJob: (id: string) => apiGet(`jobs/${id}`) as Promise<Job>,

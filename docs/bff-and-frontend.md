@@ -11,6 +11,7 @@ Tailwind CSS v4); the build output goes to `agentcyto/ui/` (committed) and is ba
 | `bff/app.py` | FastAPI routes, job worker (`run_job`), SSE, KB API, KB retrieval, SPA fallback |
 | `bff/db.py` | SQLite schema + helpers (sessions, messages, jobs, job_events, usage, `kb_*`) |
 | `bff/kb.py` | KB ingestion (see `knowledge-base.md`) |
+| `bff/byok.py` | Bring-your-own-key upstreams (OpenAI-compatible, Anthropic, Gemini): streaming, model listing, SSRF guard |
 | `bff/modes.yaml` | mode → alias map, budget, price estimates |
 
 ### Chat API
@@ -23,6 +24,20 @@ Tailwind CSS v4); the build output goes to `agentcyto/ui/` (committed) and is ba
   `[In reply to my|the assistant's earlier message: "<quote ≤600 chars>"]\n\n<text>`. The UI parses
   that wrapper to show a quote chip, so history reloads look identical.
 - `jobs.kb_docs` (JSON text column) is added by a lightweight `ALTER TABLE` migration in `DB.__init__`.
+
+`/api/chat` also accepts `system_prompt` (appended to the base prompt), `temperature`, `max_tokens`
+and `byok: {api_type: openai|anthropic|gemini, base_url, api_key, model, label}`. With `byok` the BFF calls
+the user's provider directly (chat only, no agent role, zero budget cost). The API key is kept **in memory
+only** (`_byok_keys[job_id]`), never written to SQLite/events/logs; a restart mid-job fails it with a
+"resend" message. `base_url` must resolve to public addresses (loopback/private/link-local blocked).
+Non-secret options are stored in `jobs.options` (JSON).
+
+### Search, context and BYOK API
+- `GET /api/search?q=` — case-insensitive substring search over chat titles and message text.
+- `POST /api/sessions/{id}/compress` `{action: summarize|clear, model?, byok?}` — marks live messages
+  `archived=1` (still shown, dimmed, but excluded from `get_history`) and appends a `system` message holding
+  the summary (empty for `clear`); also resets native CLI sessions. 409 while a job is running.
+- `POST /api/byok/models` `{byok}` — lists the provider's models (doubles as a key test).
 
 ### Session API
 `GET/POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}`, and
@@ -65,7 +80,16 @@ agentcyto/frontend
   own display block; bare `\begin{…}…\end{…}` blocks are wrapped. `[n]` → clickable `.cite-chip`.
 - **Composer:** `+` opens the KB checklist; KB chips (one row + "+N more"); reply bar; Enter sends.
 - **Reply:** swipe a bubble right (touch) or use the hover button (desktop).
-- **Session menu:** per-chat `…` → Rename (inline), Auto-name with AI, Delete (confirm).
+- **Session menu:** per-chat `…` → Rename (inline), Auto-name with AI, Delete (confirm). Rendered in a
+  portal on `<body>` (position fixed, flips upward near the bottom) so the scrolling list never clips it.
+- **History panel** (left of chat): Search chats (modal, `/api/search`), chat list, "Bring your own key"
+  (`ProvidersModal`). There is no KB panel here; KB attach lives in the composer `+` menu. It slides
+  (transform transition) on mobile; the top-bar button is a chat-bubble icon.
+- **Composer:** next to Send, a context button (compress/clear) and a model/settings button (`ModelMenu`:
+  provider, mode, role, model, system instructions, temperature, max tokens). Settings persist in
+  localStorage `agentcyto.settings`; BYOK providers (including keys) in `agentcyto.providers`
+  (`lib/providers.ts` holds the presets: OpenAI, Anthropic, Gemini, OpenRouter, Groq, Together, Mistral,
+  DeepSeek, xAI, Fireworks, Perplexity, Cerebras, NVIDIA NIM, Moonshot, Cohere, custom).
 - **Layout:** the document never scrolls (`html/body/#root` are `height:100%; overflow:hidden`);
   only message list and panels scroll. Mobile: nav is an off-canvas drawer opened by the menu button
   in the top bar; sessions/KB panel is a drawer that closes when a chat is picked.
