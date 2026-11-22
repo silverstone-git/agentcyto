@@ -4,6 +4,7 @@ import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen } from 'l
 import { api, Message, Session } from '../lib/api'
 import MessageBubble from '../components/chat/MessageBubble'
 import Trace, { Turn, emptyTurn } from '../components/chat/Trace'
+import { MenuButton } from '../components/layout/nav'
 import CitationModal from '../components/chat/CitationModal'
 import { QuoteChip, parseReply } from '../components/chat/MessageBubble'
 
@@ -101,6 +102,7 @@ export default function ChatPage() {
   }, [loadSessions, loadModes, loadKBDocs])
 
   const selectSession = async (id: string) => {
+    setPanelOpen(false)
     setError(null)
     setAttempt(null)
     setSessionId(id)
@@ -124,20 +126,20 @@ export default function ChatPage() {
     }
   }
 
-  const newSession = async () => {
-    try {
-      const created = await api.createSession('')
-      setSessions((prev) => [created, ...prev])
-      setSessionId(created.id)
-      setMessages([])
-      setAttempt(null)
-      setInput('')
-      activeJobRef.current = null
-      setError(null)
-    } catch (err: any) {
-      setError(err.message)
-      log('err', 'New session failed', err.message)
-    }
+  // New chats are only created server-side once a first prompt is sent.
+  const newSession = () => {
+    setPanelOpen(false)
+    if (!sessionId && messages.length === 0 && !streaming) return
+    setSessionId(null)
+    setMessages([])
+    resetLive()
+    setAttempt(null)
+    setInput('')
+    setReplyTo(null)
+    activeJobRef.current = null
+    setJobId(null)
+    setStreaming(false)
+    setError(null)
   }
 
   const toggleKB = (docId: string) => {
@@ -210,6 +212,7 @@ export default function ChatPage() {
       resetLive()
       setJobId(job.job_id)
       setSessionId(job.session_id)
+      loadSessions()
       log('info', 'Job started', `job ${job.job_id.slice(0, 8)}`)
     } catch (err: any) {
       setStreaming(false)
@@ -358,9 +361,10 @@ export default function ChatPage() {
   const toggleLog = () => setLogOpen(!logOpen)
 
   return (
-    <div className="flex flex-col h-full relative">
-      <header className="h-14 glass border-b border-surface-border flex items-center justify-between pl-14 pr-3 md:px-6 z-30 gap-2 shrink-0">
-        <div className="flex items-center gap-2 md:gap-4 min-w-0">
+    <div className="flex flex-col h-full min-h-0 relative">
+      <header className="h-14 glass border-b border-surface-border flex items-center justify-between pl-2 pr-3 md:px-6 z-30 gap-2 shrink-0">
+        <div className="flex items-center gap-1 md:gap-4 min-w-0">
+          <MenuButton />
           <button
             onClick={() => setPanelOpen(!panelOpen)}
             className="p-2 rounded-xl hover:bg-surface-border text-ink-400 transition-colors md:hidden"
@@ -442,7 +446,7 @@ export default function ChatPage() {
               </button>
             </div>
             <div className="space-y-1">
-              {sessions.map((s) => (
+              {sessions.filter((s: any) => s.messages > 0 || s.id === sessionId).map((s) => (
                 <button
                   key={s.id}
                   onClick={() => selectSession(s.id)}
@@ -457,7 +461,7 @@ export default function ChatPage() {
                   <span className="ml-auto text-[10px] text-ink-600">{s.id.slice(0, 8)}</span>
                 </button>
               ))}
-              {sessions.length === 0 && (
+              {sessions.filter((s: any) => s.messages > 0).length === 0 && (
                 <div className="px-3 py-2 text-xs text-ink-600 italic">No sessions yet</div>
               )}
             </div>
@@ -577,14 +581,19 @@ export default function ChatPage() {
                 <div className="px-2 pt-2"><QuoteChip who={replyTo.role} quote={replyTo.content} onClear={() => setReplyTo(null)} /></div>
               )}
               {attachedKb.size > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                <div className="flex flex-nowrap items-center gap-1.5 px-3 pt-2 overflow-hidden">
                   <BookOpen className="w-3.5 h-3.5 text-brand-400" />
-                  {kbDocs.filter((d) => attachedKb.has(d.id)).map((d) => (
-                    <span key={d.id} className="inline-flex items-center gap-1 max-w-[14rem] pl-2 pr-1 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/30 text-[11px] text-brand-400">
+                  {kbDocs.filter((d) => attachedKb.has(d.id)).slice(0, window.innerWidth < 640 ? 1 : 3).map((d) => (
+                    <span key={d.id} className="inline-flex items-center gap-1 max-w-[9.5rem] sm:max-w-[13rem] shrink-0 pl-2 pr-1 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/30 text-[11px] text-brand-400">
                       <span className="truncate">{d.title || d.file_name}</span>
                       <button type="button" onClick={() => toggleKB(d.id)} className="w-4 h-4 rounded-full hover:bg-brand-500/30 flex items-center justify-center" aria-label="Detach">×</button>
                     </span>
                   ))}
+                  {attachedKb.size > (window.innerWidth < 640 ? 1 : 3) && (
+                    <button type="button" onClick={() => setKbMenu(true)} className="shrink-0 px-2 py-0.5 rounded-full bg-surface-border text-[11px] text-ink-300 hover:text-ink-50">
+                      +{attachedKb.size - (window.innerWidth < 640 ? 1 : 3)} more
+                    </button>
+                  )}
                 </div>
               )}
               <div className="flex items-end gap-1 pl-1.5 pr-2 py-2">

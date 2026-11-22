@@ -1,8 +1,12 @@
 import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
+import { NavContext, MenuButton } from './nav'
 
 export default function Shell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(typeof window !== 'undefined' && window.innerWidth < 768)
+
+  const { pathname } = useLocation()
+  const isChat = pathname === '/' || pathname.startsWith('/chat')
 
   const navItems = [
     { to: '/chat', label: 'Chat', icon: '💬' },
@@ -11,15 +15,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   ]
 
   return (
+    <NavContext.Provider value={{ openMenu: () => setCollapsed(false) }}>
     <div className="flex h-[100dvh] overflow-hidden text-ink-50">
       {!collapsed && (
         <div className="fixed inset-0 z-[65] bg-black/60 md:hidden" onClick={() => setCollapsed(true)} />
       )}
-      <button
-        onClick={() => setCollapsed(false)}
-        className={`fixed top-2 left-2 z-[60] h-10 w-10 rounded-xl bg-surface-card border border-surface-border text-ink-50 text-lg flex items-center justify-center md:hidden active:bg-surface-border ${collapsed ? '' : 'hidden'}`}
-        aria-label="Open menu"
-      >☰</button>
       <aside
         className={`
           fixed inset-y-0 left-0 z-[70] w-64 glass max-md:!bg-surface-elevated max-md:!backdrop-blur-none
@@ -77,12 +77,19 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       </aside>
 
         <main className={`
-          flex-1 flex flex-col overflow-hidden
+          flex-1 flex flex-col overflow-hidden min-h-0 min-w-0
           ${collapsed ? 'md:pl-16' : 'md:pl-64'}
           transition-all duration-300
         `}>
-          {children}
+          {!isChat && (
+            <div className="md:hidden h-14 shrink-0 glass border-b border-surface-border flex items-center gap-2 px-3">
+              <MenuButton />
+              <span className="font-semibold tracking-tight">agentcyto</span>
+            </div>
+          )}
+          <div className="flex-1 min-h-0 overflow-y-auto ink-scroll">{children}</div>
         </main>
     </div>
+    </NavContext.Provider>
   )
 }

@@ -37,7 +37,8 @@
 
 html, body, #app, #root {
   @apply bg-surface-base text-ink-50 antialiased selection:bg-brand-500 selection:text-white;
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 

@@ -6,9 +6,23 @@ import 'katex/dist/katex.min.css'
 
 // Models often emit \( \) and \[ \] delimiters; remark-math wants $ and $$.
 function normalizeMath(src: string): string {
-  return src
-    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m}\n$$\n`)
+  let t = src
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `$$${m}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
+  // An odd number of $$ means the model left one dangling (or we are mid-stream): drop the last.
+  const marks = t.match(/\$\$/g)?.length ?? 0
+  if (marks % 2 === 1) {
+    const i = t.lastIndexOf('$$')
+    t = t.slice(0, i) + t.slice(i + 2)
+  }
+  // Split into $$…$$ blocks and prose; make blocks real display math, and wrap bare \begin{…}…\end{…}.
+  return t
+    .split(/(\$\$[\s\S]*?\$\$)/g)
+    .map((part, i) => {
+      if (i % 2 === 1) return `\n\n$$\n${part.slice(2, -2).trim()}\n$$\n\n`
+      return part.replace(/\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}/g, (m) => `\n\n$$\n${m}\n$$\n\n`)
+    })
+    .join('')
 }
 
 // Turn [3] / [1][2] / [1, 2] into links we can style and intercept.

@@ -459,7 +459,7 @@ async def chat(req: ChatRequest):
     alias, _cfg = resolve_job_model(req.mode, req.role, req.model)
     session_id = check_session(req.session_id) if req.session_id else uuid.uuid4().hex
     if not db.get_session(session_id):
-        db.create_session(session_id, (req.name or "")[:200])
+        db.create_session(session_id, " ".join((req.name or req.message).split())[:48])
 
     if req.idempotency_key:
         existing = db.find_idempotent_job(session_id, req.idempotency_key)
