@@ -39,6 +39,9 @@ export default function ChatPage() {
   const [attempt, setAttempt] = useState<number | null>(null)
   const [kbDocs, setKbDocs] = useState<any[]>([])
   const [attachedKb, setAttachedKb] = useState<Set<string>>(new Set())
+  // Whole skills (KB top-level folders): every document of the skill, including ones added later.
+  const [attachedSkills, setAttachedSkills] = useState<Set<string>>(new Set())
+  const kbOn = attachedKb.size + attachedSkills.size
   const [logOpen, setLogOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [replyTo, setReplyTo] = useState<{ role: 'user' | 'assistant'; content: string } | null>(null)
@@ -228,6 +231,20 @@ export default function ChatPage() {
     log('info', attachedKb.has(docId) ? 'Detached KB repo' : 'Attached KB repo', d?.title || d?.file_name || docId)
   }
 
+  const docSkill = (d: any) => d.skill || 'physics'
+  const toggleSkill = (skill: string) => {
+    const on = attachedSkills.has(skill)
+    setAttachedSkills((prev) => {
+      const next = new Set(prev)
+      if (on) next.delete(skill)
+      else next.add(skill)
+      return next
+    })
+    // the skill covers its documents: drop individually attached ones
+    if (!on) setAttachedKb((prev) => new Set([...prev].filter((id) => docSkill(kbDocs.find((x) => x.id === id) || {}) !== skill)))
+    log('info', on ? 'Detached skill' : 'Attached skill', skill)
+  }
+
   const attachAllKB = () => {
     setAttachedKb(new Set(kbDocs.map((d) => d.id)))
     log('info', 'Attached all KB repos', `${kbDocs.length} repo(s)`)
@@ -235,6 +252,7 @@ export default function ChatPage() {
 
   const detachAllKB = () => {
     setAttachedKb(new Set())
+    setAttachedSkills(new Set())
     log('info', 'Detached all KB repos')
   }
 
@@ -249,7 +267,7 @@ export default function ChatPage() {
   }
 
   const buildBody = (text: string) => {
-    const body: any = { message: text, mode, role, kb_docs: Array.from(attachedKb) }
+    const body: any = { message: text, mode, role, kb_docs: Array.from(attachedKb), kb_skills: Array.from(attachedSkills) }
     if (sessionId) body.session_id = sessionId
     if (settings.systemPrompt.trim()) body.system_prompt = settings.systemPrompt.trim()
     if (settings.temperature !== null) body.temperature = settings.temperature
@@ -300,7 +318,7 @@ export default function ChatPage() {
     setReplyTo(null)
     inputRef.current?.focus()
 
-    log('info', 'Message queued', (provider ? `custom: ${provider.label}/${provider.model}` : `mode: ${mode} · role: ${role}`) + (attachedKb.size ? ` · KB: ${attachedKb.size} repo(s)` : ''))
+    log('info', 'Message queued', (provider ? `custom: ${provider.label}/${provider.model}` : `mode: ${mode} · role: ${role}`) + (kbOn ? ` · KB: ${attachedSkills.size} skill(s), ${attachedKb.size} repo(s)` : ''))
 
     setPopup(null)
     try {
@@ -649,7 +667,7 @@ export default function ChatPage() {
               {replyTo && (
                 <div className="px-2 pt-2"><QuoteChip who={replyTo.role} quote={replyTo.content} onClear={() => setReplyTo(null)} /></div>
               )}
-              {(attachedKb.size > 0 || settings.webSearch) && (
+              {(kbOn > 0 || settings.webSearch) && (
                 <div className="flex flex-nowrap items-center gap-1.5 px-3 pt-2 overflow-hidden">
                   {settings.webSearch && (
                     <button type="button" onClick={() => patchSettings({ webSearch: false })} title="Web search is on — click to turn off"
@@ -658,7 +676,13 @@ export default function ChatPage() {
                       <Globe className="w-3 h-3" /> Web search on <span className="ml-0.5 opacity-70">×</span>
                     </button>
                   )}
-                  {attachedKb.size > 0 && <BookOpen className="w-3.5 h-3.5 shrink-0 text-brand-400" />}
+                  {kbOn > 0 && <BookOpen className="w-3.5 h-3.5 shrink-0 text-brand-400" />}
+                  {Array.from(attachedSkills).map((sk) => (
+                    <span key={`skill:${sk}`} className="inline-flex items-center gap-1 shrink-0 pl-2 pr-1 py-0.5 rounded-full bg-brand-500/25 border border-brand-500/40 text-[11px] text-brand-400 font-medium">
+                      <span className="truncate capitalize">{sk.replace(/-/g, ' ')} · all</span>
+                      <button type="button" onClick={() => toggleSkill(sk)} className="w-4 h-4 rounded-full hover:bg-brand-500/30 flex items-center justify-center" aria-label="Detach skill">×</button>
+                    </span>
+                  ))}
                   {kbDocs.filter((d) => attachedKb.has(d.id)).slice(0, window.innerWidth < 640 ? 1 : 3).map((d) => (
                     <span key={d.id} className="inline-flex items-center gap-1 max-w-[9.5rem] sm:max-w-[13rem] shrink-0 pl-2 pr-1 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/30 text-[11px] text-brand-400">
                       <span className="truncate">{d.title || d.file_name}</span>
@@ -677,7 +701,7 @@ export default function ChatPage() {
                 <button
                   type="button"
                   onClick={() => { setPopup(null); setKbMenu(!kbMenu) }}
-                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${attachedKb.size ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
+                  className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${kbOn ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
                   title="Attach knowledge base"
                   aria-label="Attach knowledge base"
                 >
@@ -695,17 +719,32 @@ export default function ChatPage() {
                       </div>
                       {kbLoading && <div className="px-2 py-3 text-xs text-ink-500 flex items-center"><Loader2 className="w-3 h-3 animate-spin mr-1" /> Loading…</div>}
                       {!kbLoading && kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents ingested yet.</div>}
-                      {kbDocs.map((d) => {
-                        const on = attachedKb.has(d.id)
+                      {Array.from(new Set(kbDocs.map(docSkill))).sort().map((sk) => {
+                        const whole = attachedSkills.has(sk)
+                        const docs = kbDocs.filter((d) => docSkill(d) === sk)
                         return (
-                          <button type="button" key={d.id} onClick={() => toggleKB(d.id)}
-                            className={`w-full text-left flex items-center gap-2 px-2 py-2 rounded-xl text-sm ${on ? 'bg-brand-500/10 text-brand-400' : 'text-ink-200 hover:bg-surface-border'}`}>
-                            <span className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${on ? 'bg-brand-500 border-brand-500 text-white' : 'border-ink-600'}`}>{on ? '✓' : ''}</span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate">{d.title || d.file_name}</span>
-                              <span className="text-[10px] text-ink-500">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
-                            </span>
-                          </button>
+                          <div key={sk} className="mt-1">
+                            <button type="button" onClick={() => toggleSkill(sk)}
+                              className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-xl text-xs font-semibold uppercase tracking-wide ${whole ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
+                              title="Attach every document of this skill">
+                              <span className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${whole ? 'bg-brand-500 border-brand-500 text-white' : 'border-ink-600'}`}>{whole ? '✓' : ''}</span>
+                              <span className="flex-1 truncate">{sk.replace(/-/g, ' ')}</span>
+                              <span className="font-normal normal-case text-[10px] text-ink-500">whole skill · {docs.length}</span>
+                            </button>
+                            {docs.map((d) => {
+                              const on = whole || attachedKb.has(d.id)
+                              return (
+                                <button type="button" key={d.id} onClick={() => !whole && toggleKB(d.id)} disabled={whole}
+                                  className={`w-full text-left flex items-center gap-2 pl-6 pr-2 py-2 rounded-xl text-sm disabled:cursor-default ${on ? 'bg-brand-500/10 text-brand-400' : 'text-ink-200 hover:bg-surface-border'}`}>
+                                  <span className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${on ? 'bg-brand-500 border-brand-500 text-white' : 'border-ink-600'}`}>{on ? '✓' : ''}</span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate">{d.title || d.file_name}</span>
+                                    <span className="text-[10px] text-ink-500">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
+                                  </span>
+                                </button>
+                              )
+                            })}
+                          </div>
                         )
                       })}
                     </div>
@@ -728,7 +767,7 @@ export default function ChatPage() {
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={replyTo ? 'Reply…' : attachedKb.size ? (settings.webSearch ? 'Ask — searching your books and the web…' : 'Ask about the attached knowledge base…') : settings.webSearch ? 'Ask — searching the web…' : 'Message agentcyto…'}
+                placeholder={replyTo ? 'Reply…' : kbOn ? (settings.webSearch ? 'Ask — searching your books and the web…' : 'Ask about the attached knowledge base…') : settings.webSearch ? 'Ask — searching the web…' : 'Message agentcyto…'}
                 rows={1}
                 className="flex-1 min-w-0 resize-none bg-transparent border-none outline-none py-2 text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
                 onKeyDown={(e) => {

@@ -30,6 +30,28 @@ from typing import Any
 from db import DB
 
 KB_SOURCE_DIR = Path(os.environ.get("KB_SOURCE_DIR", "/kb-source"))
+# Skills: each top-level folder of the KB source (repo/physics, repo/history, repo/chemistry, ...) is a
+# "skill" that chats and /api/retrieve can attach as a whole. Markdown files directly in the root
+# belong to KB_DEFAULT_SKILL, so the old layout (repo/physics mounted as the root) keeps working.
+KB_DEFAULT_SKILL = os.environ.get("KB_DEFAULT_SKILL", "physics")
+_SKILL_RE = re.compile(r"[^a-z0-9]+")
+
+
+def skill_slug(name: str) -> str:
+    return _SKILL_RE.sub("-", name.lower()).strip("-") or KB_DEFAULT_SKILL
+
+
+def skill_of(path: Path) -> str:
+    """Skill of a source file: its top-level folder under KB_SOURCE_DIR, else KB_DEFAULT_SKILL."""
+    try:
+        rel = path.resolve().relative_to(KB_SOURCE_DIR.resolve())
+    except ValueError:
+        return KB_DEFAULT_SKILL
+    return skill_slug(rel.parts[0]) if len(rel.parts) > 1 else KB_DEFAULT_SKILL
+
+
+def skill_title(skill: str) -> str:
+    return skill.replace("-", " ").title()
 DB_PATH = os.environ.get("AGENCYTO_DB", "/state/agentcyto.db")
 
 # --------------------------------------------------------------------------- #
@@ -91,10 +113,13 @@ MAX_NODE_CONTENT = 200_000
 
 
 def _doc_id_from_path(path: Path) -> str:
-    """Stable doc id derived from the file name (stem, lowercased, alnum+dash)."""
+    """Stable doc id derived from the file name (stem, lowercased, alnum+dash). Documents of the
+    default skill keep their historical bare ids; other skills are prefixed ("history-ncert-class7")
+    so the same file name can exist in two skills."""
     stem = path.stem
-    stem = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
-    return stem or "document"
+    stem = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-") or "document"
+    skill = skill_of(path)
+    return stem if skill == KB_DEFAULT_SKILL else f"{skill}-{stem}"
 
 
 def _file_hash(path: Path) -> str:
@@ -461,15 +486,31 @@ class KB:
     def __init__(self, db: DB):
         self.db = db
 
-    def source_files(self) -> list[Path]:
+    def source_files(self, skill: str | None = None) -> list[Path]:
+        """Every .md file: root files (default skill) plus each skill folder, recursively.
+        Hidden folders/files are ignored."""
         if not KB_SOURCE_DIR.exists():
             return []
-        return sorted(p for p in KB_SOURCE_DIR.iterdir()
-                      if p.is_file() and p.suffix.lower() == ".md")
+        out = [p for p in KB_SOURCE_DIR.rglob("*.md")
+               if p.is_file() and not any(part.startswith(".") for part in p.relative_to(KB_SOURCE_DIR).parts)]
+        if skill:
+            out = [p for p in out if skill_of(p) == skill]
+        return sorted(out)
 
-    def ingest_all(self, ingestion_id: str, force: bool = False) -> dict:
-        """Ingest every .md file in KB_SOURCE_DIR. Idempotent unless force."""
-        files = self.source_files()
+    def source_skills(self) -> dict[str, int]:
+        """skill -> number of source files on disk (including empty skill folders, as 0)."""
+        counts: dict[str, int] = {}
+        if KB_SOURCE_DIR.exists():
+            for d in KB_SOURCE_DIR.iterdir():
+                if d.is_dir() and not d.name.startswith("."):
+                    counts.setdefault(skill_slug(d.name), 0)
+        for p in self.source_files():
+            counts[skill_of(p)] = counts.get(skill_of(p), 0) + 1
+        return counts
+
+    def ingest_all(self, ingestion_id: str, force: bool = False, skill: str | None = None) -> dict:
+        """Ingest every .md file in KB_SOURCE_DIR (or one skill's). Idempotent unless force."""
+        files = self.source_files(skill)
         self.db.kb_create_ingestion(ingestion_id, files_found=len(files))
         self.db.kb_set_ingestion(ingestion_id, "running")
 
@@ -492,6 +533,7 @@ class KB:
                 except Exception as exc:  # noqa: BLE001
                     self.db.kb_upsert_document({
                         "id": _doc_id_from_path(path),
+                        "skill": skill_of(path),
                         "source_path": str(path),
                         "file_name": path.name,
                         "title": None,
@@ -577,6 +619,7 @@ class KB:
         # Upsert document
         self.db.kb_upsert_document({
             "id": doc_id,
+            "skill": skill_of(path),
             "source_path": str(path),
             "file_name": path.name,
             "title": title,

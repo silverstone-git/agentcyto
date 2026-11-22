@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from db import DB, clear_gateway_sessions
-from kb import get_kb, KB
+from kb import get_kb, KB, KB_DEFAULT_SKILL, skill_title
 from retrieval import Retriever
 import byok
 import websearch
@@ -297,6 +297,7 @@ async def lifespan(app: FastAPI):
     load_modes()
     restore_jobs()
     kb = get_kb(db)
+    kb.db.kb_backfill_skill(KB_DEFAULT_SKILL)
     if kb.fts_outdated() and kb.db.kb_list_documents():
         # Stemmed + breadcrumb index (fts_version 2): rebuild once in the background.
         app.state.fts_task = asyncio.create_task(asyncio.to_thread(kb.migrate_index))
@@ -314,9 +315,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="agentcyto BFF", lifespan=lifespan)
 
 
+SERVICE_PATHS = {"/api/retrieve", "/api/kb/skills"}
+
+
 def _service_bearer_ok(request: Request) -> bool:
     """Server-to-server callers (e.g. outstagram) authenticate with a bearer key instead of
-    nginx basic auth. Only /api/retrieve accepts it."""
+    nginx basic auth. Only the read-only SERVICE_PATHS accept it."""
     if not RETRIEVE_API_KEY:
         return False
     return hmac.compare_digest(request.headers.get("authorization", ""), f"Bearer {RETRIEVE_API_KEY}")
@@ -326,7 +330,7 @@ def _service_bearer_ok(request: Request) -> bool:
 async def auth_boundary(request: Request, call_next):
     if REQUIRE_AUTH_HEADER and request.url.path.startswith("/api/") \
             and request.url.path != "/api/health":
-        if request.url.path == "/api/retrieve" and _service_bearer_ok(request):
+        if request.url.path in SERVICE_PATHS and _service_bearer_ok(request):
             return await call_next(request)
         if not request.headers.get("x-auth-user"):
             return JSONResponse({"detail": "missing X-Auth-User"}, status_code=401)
@@ -342,6 +346,7 @@ class ChatRequest(BaseModel):
     model: str | None = None
     idempotency_key: str | None = None
     kb_docs: list[str] | None = None
+    kb_skills: list[str] | None = None  # attach every document of these skills (KB top-level folders)
     reply_to: dict | None = None  # {"role": "user"|"assistant", "content": str}
     system_prompt: str | None = Field(default=None, max_length=8000)
     temperature: float | None = Field(default=None, ge=0, le=2)
@@ -517,7 +522,7 @@ async def chat(req: ChatRequest):
 
     job_id = uuid.uuid4().hex
     db.create_job(job_id, session_id, req.mode, req.role, alias, req.idempotency_key,
-                  [d for d in (req.kb_docs or []) if re.fullmatch(r'[\w\-.]{1,120}', d)][:20],
+                  _expand_kb(req.kb_docs, req.kb_skills),
                   options or None)
     if req.byok:
         _byok_keys[job_id] = cfg
@@ -700,6 +705,31 @@ class KBEnrichRequest(BaseModel):
     model: str = "heavy"
 
 
+def _expand_kb(docs: list[str] | None, skills: list[str] | None) -> list[str]:
+    """Explicit documents plus every document of the attached skills (deduplicated, capped)."""
+    out = [d for d in (docs or []) if re.fullmatch(r'[\w\-.]{1,120}', d)]
+    sk = [x for x in (skills or []) if re.fullmatch(r'[a-z0-9\-]{1,60}', x)][:10]
+    for d in db.kb_doc_ids_for_skills(sk):
+        if d not in out:
+            out.append(d)
+    return out[:60]
+
+
+@app.get("/api/kb/skills")
+async def kb_skills():
+    """Skills = top-level folders of the KB source. Ingested counts plus folders not ingested yet."""
+    kb = get_kb(db)
+    on_disk = kb.source_skills()
+    rows = {r["skill"]: r for r in kb.db.kb_list_skills()}
+    out = []
+    for skill in sorted(set(on_disk) | set(rows)):
+        r = rows.get(skill, {})
+        out.append({"skill": skill, "title": skill_title(skill), "documents": int(r.get("documents") or 0),
+                    "nodes": int(r.get("nodes") or 0), "equations": int(r.get("equations") or 0),
+                    "source_files": on_disk.get(skill, 0), "updated": r.get("updated")})
+    return {"skills": out, "default": KB_DEFAULT_SKILL}
+
+
 @app.get("/api/kb/status")
 async def kb_status():
     kb = get_kb(db)
@@ -726,22 +756,26 @@ async def kb_status():
         "total_equations": total_equations,
         "total_symbols": total_symbols,
         "latest_ingestion": latest[0] if latest else None,
+        "skills": len(kb.source_skills()),
+        "default_skill": KB_DEFAULT_SKILL,
     }
 
 
 @app.post("/api/kb/ingest")
-async def kb_ingest():
+async def kb_ingest(skill: str | None = None):
+    """Ingest new/changed files: all skills, or only ?skill=history."""
     kb = get_kb(db)
-    files = kb.source_files()
+    files = kb.source_files(skill)
     if not files:
+        where = f"{KB_SOURCE_DIR}/{skill}" if skill else str(KB_SOURCE_DIR)
         return {"status": "nothing", "files_found": 0,
-                "message": f"No .md files found in {KB_SOURCE_DIR}"}
+                "message": f"No .md files found in {where}"}
 
     ingestion_id = uuid.uuid4().hex
 
     def run():
         try:
-            return kb.ingest_all(ingestion_id, force=False)
+            return kb.ingest_all(ingestion_id, force=False, skill=skill)
         finally:
             _kb_tasks.pop(ingestion_id, None)
 
@@ -947,7 +981,8 @@ class _CaptureEvents:
 
 class RetrieveRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
-    docs: list[str] | None = None       # KB document ids; default: every document
+    docs: list[str] | None = None       # KB document ids; default: every document (of `skills`, if given)
+    skills: list[str] | None = None     # limit to these skills (KB top-level folders)
     llm: bool = True                    # LLM planning + rerank (agentcyto's default)
     web: bool = False
     history: list[dict] | None = None   # optional prior turns [{role, content}] for follow-ups
@@ -959,6 +994,9 @@ async def retrieve(req: RetrieveRequest):
     Returns the prompt-ready context block plus structured passages."""
     kb = get_kb(db)
     known = [d["id"] for d in kb.db.kb_list_documents()]
+    if req.skills:
+        in_skills = set(kb.db.kb_doc_ids_for_skills(req.skills))
+        known = [d for d in known if d in in_skills]
     doc_ids = [d for d in (req.docs or known) if d in known]
     history = [{"role": m["role"], "content": m["content"][:4000]} for m in (req.history or [])
                if isinstance(m, dict) and m.get("role") in ("user", "assistant")
@@ -972,7 +1010,7 @@ async def retrieve(req: RetrieveRequest):
     ctx, info = await r.run(doc_ids, history)
     info = info or {}
     return {"id": rid, "context": ctx, "method": info.get("method"), "passages": info.get("hits", []),
-            "queries": info.get("queries", []), "docs": doc_ids,
+            "queries": info.get("queries", []), "docs": doc_ids, "skills": req.skills or [],
             "trace": [e for e in cap.events if e["type"] == "trace"]}
 
 

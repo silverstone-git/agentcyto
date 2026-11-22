@@ -134,8 +134,19 @@ export interface KbStatus {
   latest_ingestion: any | null
 }
 
+export interface KbSkill {
+  skill: string
+  title: string
+  documents: number
+  nodes: number
+  equations: number
+  source_files: number
+  updated?: number | null
+}
+
 export interface KbDocument {
   id: string
+  skill?: string | null
   file_name: string
   title?: string | null
   status: string
@@ -189,7 +200,8 @@ export const api = {
   kbDocuments: () => apiGet('kb/documents') as Promise<KbDocument[]>,
   kbDocument: (id: string) => apiGet(`kb/documents/${id}`),
   kbDeleteDocument: (id: string) => apiDelete(`kb/documents/${id}`),
-  kbIngest: () => apiPost('kb/ingest', {}),
+  kbIngest: (skill?: string) => apiPost(skill ? `kb/ingest?skill=${encodeURIComponent(skill)}` : 'kb/ingest', {}),
+  kbSkills: () => apiGet('kb/skills') as Promise<{ skills: KbSkill[]; default: string }>,
   kbReindex: () => apiPost('kb/reindex', {}),
   kbClear: () => apiDelete('kb/clear'),
   kbSearch: (params: { q?: string; type?: string; doc?: string; limit?: number }) => {

@@ -10,6 +10,42 @@ The KB is a BFF extension that compiles the physics Markdown sources in `repo/ph
 queryable mathematical knowledge base, all inside SQLite (no vector/graph DB). It gives full
 ingestion/search control from the web page.
 
+### 9.0 Skills (one folder per subject)
+
+The KB source is `repo/`, mounted read-only at `/kb-source`. Every top-level folder is a **skill**
+(`repo/physics/`, `repo/history/`, `repo/geography/`, `repo/chemistry/`, ...). Markdown files inside a
+skill folder are found recursively; files directly in the source root belong to `KB_DEFAULT_SKILL`
+(default `physics`), so the old mount (`repo/physics` as the root) keeps working unchanged.
+
+- `kb_documents.skill` holds the skill (added by a lightweight migration; older rows are backfilled
+  with `KB_DEFAULT_SKILL` at startup).
+- Document ids: the default skill keeps bare file-stem ids (existing chats and attachments still
+  resolve); other skills are prefixed, e.g. `history-ncert-class7`.
+- `GET /api/kb/skills` → `{skills: [{skill, title, documents, nodes, equations, source_files, updated}], default}`.
+  Lists folders on disk even before they are ingested. It also accepts the server-to-server bearer
+  (like `/api/retrieve`), so outstagram can show students the available skills.
+- `POST /api/kb/ingest?skill=history` ingests one skill only.
+- `POST /api/retrieve` takes `skills: ["history"]` to search only those skills.
+- Chat: `POST /api/chat` takes `kb_skills: [...]`; every document of those skills is attached (deduplicated with
+  `kb_docs`, capped at 60 documents). The KB menu in the chat composer groups documents by skill with a
+  "whole skill" toggle; the admin page shows a Skills panel with per-skill ingest.
+
+**Adding a subject:** `mkdir repo/history && cp *.md repo/history/`, then Admin → Skills → History → Ingest
+(or `POST /api/kb/ingest?skill=history`). No restart needed.
+
+**Moving to the multi-skill mount (one-time, on the agentcyto box):** the compose file now mounts `../repo`
+instead of `../repo/physics`. Physics files stay in `repo/physics/`, so their ids do not change; run
+`docker compose up -d bff` and nothing needs re-ingesting (the `source_path` column refreshes on the next ingest).
+nginx: let outstagram's bearer reach the skills list as well as retrieval, before `location /agentcyto/`:
+
+```nginx
+location = /agentcyto/api/kb/skills {
+    auth_basic off;
+    proxy_pass http://127.0.0.1:8890/api/kb/skills;
+    add_header Cache-Control "no-store" always;
+}
+```
+
 ### 9.1 Design principles
 
 - **No user uploads.** Ingestion is admin-controlled from the KB tab in the static UI. The source

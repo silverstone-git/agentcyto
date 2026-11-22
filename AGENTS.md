@@ -43,7 +43,7 @@ must never be forgotten, the current status and the repository map; everything e
 - **Retrieval v2** (2026-11-22): LLM-planned, outline-aware KB search + rerank (default on, toggle
   "LLM-assisted search"), stemmed breadcrumb FTS index, optional Brave web search with page scraping
   (globe toggle, clickable web citations). Details: `docs/knowledge-base.md` §9.7–9.8.
-- **Knowledge Base (KB)**: SQLite-only (`kb_*` tables + FTS5) compiled from `repo/physics/` by `kb.py`. Current verified totals: 13 documents, 103,039 nodes, 27,375 equations, 1,452 symbols (an earlier parser bug had dropped one-line `$$…$$` equations; fixed 2026-11-22 — see `docs/knowledge-base.md` §9.7). Attached KB docs are searched per chat turn (FTS5/bm25) and injected into the prompt; admin editing lives on a separate password-gated page (`apple` for now).
+- **Knowledge Base (KB)**: SQLite-only (`kb_*` tables + FTS5) compiled from `repo/<skill>/` (one folder per subject: physics, history, ...) by `kb.py`; see `docs/knowledge-base.md` §9.0. Current verified totals: 13 documents, 103,039 nodes, 27,375 equations, 1,452 symbols (an earlier parser bug had dropped one-line `$$…$$` equations; fixed 2026-11-22 — see `docs/knowledge-base.md` §9.7). Attached KB docs are searched per chat turn (FTS5/bm25) and injected into the prompt; admin editing lives on a separate password-gated page (`apple` for now).
 - Git repository initialised with a baseline commit; no secret files tracked.
 
 **Not yet built (Phase 6 + open drills):**
@@ -90,7 +90,7 @@ must never be forgotten, the current status and the repository map; everything e
 │   └── scripts/
 │       └── deploy.sh             # htpasswd + nginx test/reload
 │
-├── repo/physics/                 # KB source of truth: 13 physics Markdown files (~26MB), read-only
+├── repo/<skill>/                 # KB source of truth, one folder per skill (physics: 13 Markdown files, ~26MB), read-only
 └── cli-gateway/
     ├── .env                      # non-secret Compose settings (APP_UID, WORKSPACE_DIR, timeouts…)
     ├── .env.example              # template

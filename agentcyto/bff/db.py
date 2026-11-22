@@ -253,6 +253,7 @@ class DB:
                 "ALTER TABLE jobs ADD COLUMN options TEXT",            # JSON: system_prompt, temperature, byok (no key)
                 "ALTER TABLE messages ADD COLUMN meta TEXT",           # JSON: retrieval hits, trace, thinking
                 "ALTER TABLE messages ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",  # compressed/cleared out of context
+                "ALTER TABLE kb_documents ADD COLUMN skill TEXT",       # top-level KB folder (physics, history, ...)
             ):
                 try:
                     c.execute(ddl)
@@ -525,10 +526,10 @@ class DB:
         with self.conn() as c:
             c.execute(
                 "INSERT INTO kb_documents (id,source_path,file_name,title,file_hash,file_size,"
-                "status,error,ingested_at,node_count,equation_count,created,updated) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "status,error,ingested_at,node_count,equation_count,created,updated,skill) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
-                "source_path=excluded.source_path, file_name=excluded.file_name, "
+                "source_path=excluded.source_path, file_name=excluded.file_name, skill=excluded.skill, "
                 "title=excluded.title, file_hash=excluded.file_hash, "
                 "file_size=excluded.file_size, status=excluded.status, "
                 "error=excluded.error, ingested_at=excluded.ingested_at, "
@@ -538,7 +539,7 @@ class DB:
                  doc["file_hash"], doc["file_size"], doc.get("status", "ingested"),
                  doc.get("error"), doc.get("ingested_at"),
                  doc.get("node_count", 0), doc.get("equation_count", 0),
-                 doc.get("created", time.time()), time.time()),
+                 doc.get("created", time.time()), time.time(), doc.get("skill")),
             )
 
     def kb_get_document(self, doc_id: str) -> dict | None:
@@ -553,6 +554,29 @@ class DB:
                 "FROM kb_documents d ORDER BY d.updated DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def kb_backfill_skill(self, default_skill: str) -> int:
+        """Documents ingested before skills existed belong to the default skill."""
+        with self.conn() as c:
+            return c.execute("UPDATE kb_documents SET skill=? WHERE skill IS NULL OR skill=''",
+                             (default_skill,)).rowcount
+
+    def kb_list_skills(self) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT skill, COUNT(*) AS documents, COALESCE(SUM(node_count),0) AS nodes, "
+                "COALESCE(SUM(equation_count),0) AS equations, MAX(updated) AS updated "
+                "FROM kb_documents WHERE status='ingested' GROUP BY skill ORDER BY skill").fetchall()
+        return [dict(r) for r in rows]
+
+    def kb_doc_ids_for_skills(self, skills: list[str]) -> list[str]:
+        if not skills:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                f"SELECT id FROM kb_documents WHERE status='ingested' AND skill IN ({','.join('?' * len(skills))}) "
+                "ORDER BY skill, title", tuple(skills)).fetchall()
+        return [r[0] for r in rows]
 
     def kb_delete_document(self, doc_id: str) -> int:
         """Remove a document and all its nodes, edges, symbols, refs, derivations, FTS rows."""

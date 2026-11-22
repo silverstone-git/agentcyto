@@ -42,11 +42,13 @@ Non-secret options are stored in `jobs.options` (JSON).
   `archived=1` (still shown, dimmed, but excluded from `get_history`) and appends a `system` message holding
   the summary (empty for `clear`); also resets native CLI sessions. 409 while a job is running.
 - `POST /api/byok/models` `{byok}` — lists the provider's models (doubles as a key test).
-- `POST /api/retrieve` `{query, docs?, llm?=true, web?=false, history?}` — stateless run of the chat
+- `GET /api/kb/skills` — KB skills (top-level folders of `repo/`) with document counts; accepts the
+  service bearer too (see knowledge-base.md §9.0).
+- `POST /api/retrieve` `{query, docs?, skills?, llm?=true, web?=false, history?}` — stateless run of the chat
   retrieval pipeline (`retrieval.py`) without a session; returns `{context, passages, method, queries, docs, trace}`.
   `docs` defaults to every KB document. Server-to-server callers (outstagram) authenticate with
   `Authorization: Bearer <RETRIEVE_API_KEY>` (defaults to `LITELLM_MASTER_KEY`); that bearer is accepted on
-  this path only. nginx must let it through without basic auth, placed before `location /agentcyto/`:
+  this path and `/api/kb/skills` only. nginx must let it through without basic auth, placed before `location /agentcyto/`:
   ```nginx
   location = /agentcyto/api/retrieve {
       auth_basic off;

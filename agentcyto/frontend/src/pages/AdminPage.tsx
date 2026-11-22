@@ -4,8 +4,9 @@ import {
   KbStatus,
   KbDocument,
   KbSearchResult,
+  KbSkill,
 } from '../lib/api'
-import { Lock, RefreshCw, Trash2, Search, FileText, Database, Play, AlertTriangle } from 'lucide-react'
+import { Lock, RefreshCw, Trash2, Search, FileText, Database, Play, AlertTriangle, FolderTree } from 'lucide-react'
 
 const ADMIN_PASSWORD = 'apple'
 
@@ -58,6 +59,8 @@ export default function AdminPage() {
 function AdminBody() {
   const [status, setStatus] = useState<KbStatus | null>(null)
   const [docs, setDocs] = useState<KbDocument[]>([])
+  const [skills, setSkills] = useState<KbSkill[]>([])
+  const [defaultSkill, setDefaultSkill] = useState('physics')
   const [searchResults, setSearchResults] = useState<KbSearchResult[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [searchType, setSearchType] = useState('')
@@ -88,6 +91,13 @@ function AdminBody() {
       setDocs(d)
     } catch (err: any) {
       setDocs([])
+    }
+    try {
+      const s = await api.kbSkills()
+      setSkills(s.skills)
+      setDefaultSkill(s.default)
+    } catch {
+      setSkills([])
     }
   }
 
@@ -131,7 +141,7 @@ function AdminBody() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-ink-50">Knowledge base</h1>
-          <p className="text-ink-500 text-sm">Admin controls for the physics KB. Source: read-only Markdown in repo/physics/.</p>
+          <p className="text-ink-500 text-sm">Admin controls for the knowledge bank. Source: read-only Markdown in repo/&lt;skill&gt;/ (physics, history, …).</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={`px-2 py-1 rounded text-[10px] font-medium border ${status?.source_dir_exists ? 'bg-success/10 text-success border-success/20' : 'bg-danger/10 text-danger border-danger/20'}`}>
@@ -266,7 +276,48 @@ function AdminBody() {
         ) : null}
       </div>
 
-      {/* Documents */}
+      {/* Skills: one per top-level folder of the KB source */}
+      <div className="card p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <FolderTree className="w-4 h-4 text-brand-400" />
+          <h2 className="text-sm font-semibold text-ink-200">Skills ({skills.length})</h2>
+        </div>
+        <p className="text-[11px] text-ink-500 mb-3">
+          Each top-level folder of the source is a skill: <code>repo/physics/</code>, <code>repo/history/</code>, <code>repo/chemistry/</code>…
+          Drop Markdown files into a new folder and ingest it. Chats (and outstagram's tutor) can attach a whole skill.
+          Files directly in the source root belong to <code>{defaultSkill}</code>.
+        </p>
+        {skills.length === 0 ? (
+          <div className="text-center py-4 text-ink-600 italic text-sm">No skills found.</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {skills.map((k) => {
+              const pending = Math.max(0, k.source_files - k.documents)
+              return (
+                <div key={k.skill} className="flex items-center gap-3 p-3 rounded-xl border border-surface-border">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-ink-200 truncate">{k.title} <span className="text-ink-600 font-normal">· {k.skill}</span></div>
+                    <div className="text-[11px] text-ink-600">
+                      {k.documents} docs · {k.nodes.toLocaleString()} nodes · {k.equations.toLocaleString()} eqns
+                      {pending > 0 && <span className="text-warn"> · {pending} file(s) not ingested</span>}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={loading || k.source_files === 0}
+                    onClick={() => runAction(() => api.kbIngest(k.skill), `Ingest ${k.title}`).catch(() => {})}
+                    className="shrink-0 px-2.5 py-1 rounded-lg text-xs bg-surface-border text-ink-200 hover:bg-brand-600 hover:text-white disabled:opacity-40"
+                  >
+                    Ingest
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Documents, grouped by skill */}
       <div className="card p-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-ink-200">Documents ({docs.length})</h2>
@@ -274,36 +325,41 @@ function AdminBody() {
         {docs.length === 0 ? (
           <div className="text-center py-6 text-ink-600 italic">No documents ingested yet.</div>
         ) : (
-          <div className="space-y-2">
-            {docs.map((d) => (
-              <div key={d.id} className="flex items-center justify-between p-3 rounded-xl border border-surface-border hover:bg-surface-border/30 transition-colors group">
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-ink-200">{d.title || d.file_name}</div>
-                  <div className="text-[11px] text-ink-600">{d.node_count || 0} nodes · {d.equation_count || 0} eqns · {d.status}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
-                    d.status === 'done' ? 'bg-success/10 text-success border border-success/20' : 'bg-ink-800/20 text-ink-400 border border-ink-700'
-                  }`}>{d.status}</span>
-                  <button
-                    onClick={() => {
-                      if (!confirm(`Remove document "${d.title || d.file_name}" and all its nodes?`)) return
-                      api.kbDeleteDocument(d.id).then(() => {
-                        setDocs(docs.filter((x) => x.id !== d.id))
-                        setStatusMsg(`✓ Removed ${d.title || d.file_name}.`)
-                        setStatusType('ok')
-                        loadStatus()
-                      }).catch((err: any) => {
-                        setStatusMsg(`✗ Remove failed: ${err.message}`)
-                        setStatusType('err')
-                      })
-                    }}
-                    className="p-1.5 text-ink-500 hover:text-danger transition-colors"
-                    title="Remove document"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
+          <div className="space-y-4">
+            {Array.from(new Set(docs.map((d) => d.skill || defaultSkill))).sort().map((sk) => (
+              <div key={sk} className="space-y-2">
+                <div className="text-[11px] uppercase tracking-wide text-ink-500">{sk}</div>
+                {docs.filter((d) => (d.skill || defaultSkill) === sk).map((d) => (
+                  <div key={d.id} className="flex items-center justify-between p-3 rounded-xl border border-surface-border hover:bg-surface-border/30 transition-colors group">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-ink-200 truncate">{d.title || d.file_name}</div>
+                      <div className="text-[11px] text-ink-600">{d.node_count || 0} nodes · {d.equation_count || 0} eqns · {d.status}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
+                        d.status === 'ingested' ? 'bg-success/10 text-success border border-success/20' : 'bg-ink-800/20 text-ink-400 border border-ink-700'
+                      }`}>{d.status}</span>
+                      <button
+                        onClick={() => {
+                          if (!confirm(`Remove document "${d.title || d.file_name}" and all its nodes?`)) return
+                          api.kbDeleteDocument(d.id).then(() => {
+                            setDocs(docs.filter((x) => x.id !== d.id))
+                            setStatusMsg(`✓ Removed ${d.title || d.file_name}.`)
+                            setStatusType('ok')
+                            loadStatus()
+                          }).catch((err: any) => {
+                            setStatusMsg(`✗ Remove failed: ${err.message}`)
+                            setStatusType('err')
+                          })
+                        }}
+                        className="p-1.5 text-ink-500 hover:text-danger transition-colors"
+                        title="Remove document"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
