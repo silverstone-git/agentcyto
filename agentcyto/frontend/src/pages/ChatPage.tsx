@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Plus, Send, StopCircle, Loader2, FileText, Sparkles } from 'lucide-react'
 import { api, Message, Session } from '../lib/api'
 import MessageBubble from '../components/chat/MessageBubble'
+import Trace, { Turn, emptyTurn } from '../components/chat/Trace'
 
 export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -23,6 +24,10 @@ export default function ChatPage() {
   const [logs, setLogs] = useState<{ type: string; text: string; detail?: string; time: string }[]>([])
   const [error, setError] = useState<string | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
+  const [live, setLive] = useState<Turn>(emptyTurn())
+  const liveRef = useRef<Turn>(emptyTurn())
+  const attemptRef = useRef<number>(0)
+  const [jobId, setJobId] = useState<string | null>(null)
   const activeJobRef = useRef<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const startedAtRef = useRef<number | null>(null)
@@ -146,6 +151,16 @@ export default function ChatPage() {
     log('info', 'Detached all KB repos')
   }
 
+  const resetLive = () => {
+    liveRef.current = emptyTurn()
+    attemptRef.current = 0
+    setLive(liveRef.current)
+  }
+  const patchLive = (fn: (t: Turn) => Turn) => {
+    liveRef.current = fn(liveRef.current)
+    setLive(liveRef.current)
+  }
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     const text = input.trim()
@@ -175,6 +190,8 @@ export default function ChatPage() {
 
       const job = await api.chat(body)
       activeJobRef.current = job.job_id
+      resetLive()
+      setJobId(job.job_id)
       setSessionId(job.session_id)
       log('info', 'Job started', `job ${job.job_id.slice(0, 8)}`)
     } catch (err: any) {
@@ -208,6 +225,8 @@ export default function ChatPage() {
       if (sessionId) body.session_id = sessionId
       const job = await api.chat(body)
       activeJobRef.current = job.job_id
+      resetLive()
+      setJobId(job.job_id)
       log('info', 'Retrying', `job ${job.job_id.slice(0, 8)}`)
     } catch (err: any) {
       setStreaming(false)
@@ -217,8 +236,7 @@ export default function ChatPage() {
 
   // SSE stream
   useEffect(() => {
-    if (!activeJobRef.current) return
-    const jobId = activeJobRef.current
+    if (!jobId) return
     let cancelled = false
 
     ;(async () => {
@@ -275,34 +293,35 @@ export default function ChatPage() {
     })()
 
     return () => { cancelled = true }
-  }, [activeJobRef.current])
+  }, [jobId])
 
   const handleEvent = (eventType: string, payload: any) => {
     if (eventType === 'delta') {
-      if (payload.attempt !== attempt) {
+      if (payload.attempt !== attemptRef.current) {
+        if (attemptRef.current) log('info', 'Streaming', `attempt ${payload.attempt}`)
+        attemptRef.current = payload.attempt
         setAttempt(payload.attempt)
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last?.role === 'assistant' && !last.content) return prev
-          return [...prev, { role: 'assistant', content: '' }]
-        })
-        log('info', 'Streaming', `attempt ${payload.attempt}`)
+        patchLive((t) => ({ ...t, text: '' }))
       }
-      const text = payload.text || ''
-      setMessages((prev) => {
-        const next = [...prev]
-        const last = next[next.length - 1]
-        if (last?.role === 'assistant') {
-          last.content = (last.content || '') + text
-        } else {
-          next.push({ role: 'assistant', content: text })
-        }
-        return next
-      })
+      patchLive((t) => ({ ...t, text: t.text + (payload.text || '') }))
+    } else if (eventType === 'thinking') {
+      patchLive((t) => ({ ...t, thinking: t.thinking + (payload.text || '') }))
+    } else if (eventType === 'trace') {
+      patchLive((t) => ({ ...t, trace: [...t.trace, payload] }))
+      log(payload.step === 'error' ? 'err' : 'info', `KB ${payload.step}`, payload.text)
+    } else if (eventType === 'retrieval') {
+      patchLive((t) => ({ ...t, retrieval: payload }))
     } else if (eventType === 'done') {
       const duration = startedAtRef.current ? Date.now() - startedAtRef.current : null
+      const turn = liveRef.current
+      setMessages((prev) => [...prev, {
+        role: 'assistant', content: payload.text || turn.text, model: payload.model,
+        meta: { trace: turn.trace, retrieval: turn.retrieval, thinking: turn.thinking },
+      }])
+      resetLive()
       setStreaming(false)
       activeJobRef.current = null
+      setJobId(null)
       log('ok', 'Complete', `answered by ${payload.model || 'unknown'}` + (duration ? ` · ${duration}ms` : ''))
       scrollToBottom()
     } else if (eventType === 'status') {
@@ -498,17 +517,20 @@ export default function ChatPage() {
             )}
             {messages.map((msg, i) => (
               <div key={i} className="mb-6">
+                {msg.role === 'assistant' && msg.meta && (msg.meta.trace?.length > 0 || msg.meta.thinking) && (
+                  <Trace turn={{ text: msg.content, thinking: msg.meta.thinking || '', trace: msg.meta.trace || [], retrieval: msg.meta.retrieval || null }} />
+                )}
                 <MessageBubble
                   role={msg.role}
                   content={msg.content}
                   model={msg.role === 'assistant' ? (msg.model || undefined) : undefined}
-                  meta={msg.role === 'assistant' && i === messages.length - 1 && streaming ? { attempt, streaming: true } : undefined}
                 />
               </div>
             ))}
-            {streaming && messages.length > 0 && messages[messages.length - 1]?.role !== 'assistant' && (
+            {streaming && (
               <div className="mb-6">
-                <MessageBubble role="assistant" content="" meta={{ attempt, streaming: true }} />
+                <Trace turn={live} live />
+                <MessageBubble role="assistant" content={live.text} meta={{ attempt, streaming: true }} />
               </div>
             )}
             {error && (

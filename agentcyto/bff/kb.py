@@ -44,6 +44,7 @@ DISPLAY_MATH_CLOSE_ONLY = re.compile(r"^(.*?)\$\$\s*$")
 INLINE_MATH_RE = re.compile(r"\$(.+?)\$")
 TAG_LABEL_RE = re.compile(r"\\tag\s*\{([^}]+)\}")
 # Label like (3.1) or (0.5a) at end of a line
+STANDALONE_LABEL_RE = re.compile(r"^\s*\((\d+(?:[.\-]\d+)*[a-z]?)\)\s*$")
 INLINE_LABEL_RE = re.compile(r"\((\d+(?:\.\d+)*[a-z]?)\)\s*$")
 # LaTeX commands: \phi, \hbar, \lambda, etc.
 LATEX_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
@@ -383,11 +384,20 @@ class _ParserState:
                     # Single-line display math: $$ ... $$
                     self.math_buffer = [close_m.group(1)]
                     self.math_start_line = idx
+                    self.in_math = True  # flush_math ignores blocks unless in_math
                     self.flush_math(idx)
                 else:
                     self.math_buffer = [rest]
                     self.math_start_line = idx
                     self.in_math = True
+                continue
+
+            # Equation number on its own line, e.g. " (9.5)" right after $$...$$
+            lm = STANDALONE_LABEL_RE.match(line)
+            if lm and self.pending_para_start is None and self.nodes \
+                    and self.nodes[-1]["type"] == "equation" and not self.nodes[-1]["label"] \
+                    and idx - (self.nodes[-1]["line_end"] or 0) <= 2:
+                self.nodes[-1]["label"] = lm.group(1)
                 continue
 
             # Heading
@@ -496,6 +506,27 @@ class KB:
             "error": error,
         }
 
+    @staticmethod
+    def _pretty_stem(path: Path) -> str:
+        words = re.sub(r"[_\-]+", " ", path.stem).split()
+        out = []
+        for w in words:
+            m = re.fullmatch(r"vol(\d+)", w, re.I)
+            out.append(f"Vol. {m.group(1)}" if m else (w if w.isupper() else w.capitalize()))
+        return " ".join(out)
+
+    def _pick_title(self, path: Path, heading: str | None, doc_id: str) -> str:
+        """Prefer the book's own heading, but fall back to the file name when the
+        heading is generic ('Feynman', 'The Feynman') or already used by another document."""
+        pretty = self._pretty_stem(path)
+        if not heading:
+            return pretty
+        h = re.sub(r"[*_]", "", heading).strip()
+        used = {d.get("title") for d in self.db.kb_list_documents() if d.get("id") != doc_id}
+        if len(h) < 12 or h in used or re.search(r"lectures on physics", h, re.I):
+            return pretty
+        return h
+
     def ingest_file(self, path: Path, force: bool = False) -> str:
         """Ingest a single file. Returns 'ingested', 'skipped', or 'failed'."""
         doc_id = _doc_id_from_path(path)
@@ -521,8 +552,7 @@ class KB:
             if n["type"] == "chapter" and n["title"]:
                 title = n["title"]
                 break
-        if not title:
-            title = path.stem
+        title = self._pick_title(path, title, doc_id)
 
         now = time.time()
         # Upsert document

@@ -238,6 +238,10 @@ class DB:
         self._local = threading.local()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            try:  # lightweight migration: KB docs attached to a job
+                c.execute("ALTER TABLE jobs ADD COLUMN kb_docs TEXT")
+            except sqlite3.OperationalError:
+                pass
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
@@ -312,13 +316,15 @@ class DB:
 
     # -- jobs ------------------------------------------------------------- #
     def create_job(self, job_id: str, session_id: str, mode: str, role: str,
-                   model: str, idempotency_key: str | None) -> None:
+                   model: str, idempotency_key: str | None,
+                   kb_docs: list[str] | None = None) -> None:
         now = time.time()
         with self.conn() as c:
             c.execute(
-                "INSERT INTO jobs (id,session_id,mode,role,model,status,idempotency_key,created,updated) "
-                "VALUES (?,?,?,?,?,'queued',?,?,?)",
-                (job_id, session_id, mode, role, model, idempotency_key, now, now),
+                "INSERT INTO jobs (id,session_id,mode,role,model,status,idempotency_key,created,updated,kb_docs) "
+                "VALUES (?,?,?,?,?,'queued',?,?,?,?)",
+                (job_id, session_id, mode, role, model, idempotency_key, now, now,
+                 json.dumps(kb_docs) if kb_docs else None),
             )
 
     def get_job(self, job_id: str) -> dict | None:

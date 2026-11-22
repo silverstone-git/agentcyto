@@ -17,7 +17,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       )}
       <button
         onClick={() => setCollapsed(false)}
-        className={`fixed top-2 left-2 z-20 p-2 rounded-xl glass text-ink-200 md:hidden ${collapsed ? '' : 'hidden'}`}
+        className={`fixed top-2 left-2 z-20 h-10 w-10 rounded-xl bg-surface-card border border-surface-border text-ink-50 text-lg flex items-center justify-center md:hidden active:bg-surface-border ${collapsed ? '' : 'hidden'}`}
         aria-label="Open menu"
       >☰</button>
       <aside

@@ -128,6 +128,91 @@ def estimate_cost(model: str | None, usage: dict | None) -> float:
     return round(rate * tokens / 1_000_000, 6)
 
 
+_STOP = set("a an and are as at be but by can could do does for from how i if in into is it its me my of on or our so than that the their then there these this to was we what when where which who why will with would you your explain tell about please give show describe using use find derive".split())
+
+
+def _terms(text: str) -> list[str]:
+    seen: list[str] = []
+    for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text.lower()):
+        if w not in _STOP and w not in seen:
+            seen.append(w)
+    return seen[:10]
+
+
+def _kb_search(doc_ids: list[str], match: str, per_doc: int) -> list[dict]:
+    kb = get_kb(db)
+    hits: list[dict] = []
+    for d in doc_ids:
+        try:
+            hits += kb.db.kb_search_fts(match, limit=per_doc, doc_id=d)
+        except sqlite3.Error:
+            continue
+    hits.sort(key=lambda h: h["rank"])  # bm25: lower is better
+    return hits
+
+
+async def retrieve_kb_context(job_id: str, doc_ids: list[str], session_id: str) -> str:
+    """Retrieve from attached KB docs with SQLite FTS5 (bm25) and trace every step."""
+    def tr(step: str, text: str, **extra):
+        db.add_event(job_id, "trace", {"step": step, "text": text, **extra})
+
+    msgs = db.get_history(session_id)
+    question = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+    kb = get_kb(db)
+    titles = {}
+    for d in kb.db.kb_list_documents():
+        titles[d["id"]] = d.get("title") or d["id"]
+    doc_ids = [d for d in doc_ids if d in titles]
+    if not doc_ids:
+        tr("decision", "Attached KB docs not found; answering without retrieval.")
+        return ""
+    tr("decision", f"{len(doc_ids)} KB document(s) attached, so I search them before answering.",
+       docs=[titles[d] for d in doc_ids])
+    terms = _terms(question)
+    if not terms:
+        tr("decision", "No searchable keywords in the question; skipping retrieval.")
+        return ""
+    tr("method", "SQLite FTS5 full-text search, ranked by bm25 (no shell command, no embeddings).",
+       tool="kb_search_fts")
+    # Strategy 1: all key terms (AND); strategy 2: any term (OR), prefix-matched.
+    attempts = [("AND", " AND ".join(f'"{t}"' for t in terms[:4])),
+                ("OR", " OR ".join(f'"{t}"*' for t in terms))]
+    hits: list[dict] = []
+    for label, match in attempts:
+        hits = await asyncio.to_thread(_kb_search, doc_ids, match, 6)
+        tr("search", f"{label} query returned {len(hits)} hit(s)", query=match,
+           sql="SELECT ... FROM kb_node_fts MATCH ? ORDER BY bm25(kb_node_fts)")
+        if len(hits) >= 3:
+            break
+        if label == "AND":
+            tr("decision", "Too few hits with all terms; broadening to any-term OR search.")
+    if not hits:
+        tr("decision", "Nothing relevant found in the attached KB; answering from general knowledge.")
+        return ""
+    picked = hits[:8]
+    parts, used, total = [], [], 0
+    for i, h in enumerate(picked, 1):
+        sec = kb.db.kb_get_node(h["parent_id"]) if h.get("parent_id") else None
+        where = f"{titles.get(h['document_id'], h['document_id'])}"
+        if sec and sec.get("title"):
+            where += f" / {sec['title'][:80]}"
+        body = (h.get("latex") or h.get("content") or "")[:1200]
+        label = f" eq {h['label']}" if h.get("label") else ""
+        chunk = f"[{i}] ({h['type']}{label}; {where}; lines {h['line_start']}-{h['line_end']})\n{body}"
+        if total + len(chunk) > 9000:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+        used.append({"n": i, "type": h["type"], "doc": titles.get(h["document_id"]),
+                     "section": (sec or {}).get("title"), "label": h.get("label"),
+                     "lines": f"{h['line_start']}-{h['line_end']}", "preview": body[:160]})
+    db.add_event(job_id, "retrieval", {"method": "fts5-bm25", "terms": terms, "hits": used})
+    tr("decision", f"Injecting top {len(parts)} passage(s) into the model context.")
+    return ("Reference passages retrieved from the user's attached knowledge base. Prefer them "
+            "when relevant and cite as [n]; say so if they do not cover the question.\n\n"
+            + "\n\n".join(parts))
+
+
 async def run_job(job_id: str) -> None:
     job = db.get_job(job_id)
     if not job or job["status"] in ("done", "blocked", "cancelled"):
@@ -137,7 +222,21 @@ async def run_job(job_id: str) -> None:
     db.update_job(job_id, status="running", attempts=attempts)
     db.add_event(job_id, "status", {"status": "running", "attempt": attempts})
 
-    history = [{"role": "system", "content": SYSTEM_PROMPT}] + db.get_history(job["session_id"])
+    system_prompt = SYSTEM_PROMPT
+    kb_ctx = ""
+    if job.get("kb_docs"):
+        try:
+            kb_ctx = await retrieve_kb_context(job_id, json.loads(job["kb_docs"]), job["session_id"])
+        except Exception as exc:  # noqa: BLE001 - retrieval must never kill the chat
+            db.add_event(job_id, "trace", {"step": "error", "text": f"retrieval failed: {exc}"[:300]})
+            kb_ctx = ""
+    history = [{"role": "system", "content": system_prompt}] + db.get_history(job["session_id"])
+    if kb_ctx:
+        # CLI-backed models drop system messages, so put the passages in the last user turn.
+        for m in reversed(history):
+            if m["role"] == "user":
+                m["content"] = f"{kb_ctx}\n\n---\nUser question:\n{m['content']}"
+                break
     payload = {"model": job["model"], "messages": history, "stream": True}
     headers = {
         "Authorization": f"Bearer {MASTER_KEY}",
@@ -173,6 +272,9 @@ async def run_job(job_id: str) -> None:
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
+                    think = delta.get("reasoning_content") or delta.get("reasoning")
+                    if think:
+                        db.add_event(job_id, "thinking", {"text": think, "attempt": attempts})
                     text = delta.get("content")
                     if text:
                         text_parts.append(text)
@@ -259,6 +361,7 @@ class ChatRequest(BaseModel):
     name: str | None = None
     model: str | None = None
     idempotency_key: str | None = None
+    kb_docs: list[str] | None = None
 
 
 class SessionRequest(BaseModel):
@@ -362,7 +465,8 @@ async def chat(req: ChatRequest):
     db.add_message(session_id, "user", req.message)
 
     job_id = uuid.uuid4().hex
-    db.create_job(job_id, session_id, req.mode, req.role, alias, req.idempotency_key)
+    db.create_job(job_id, session_id, req.mode, req.role, alias, req.idempotency_key,
+                  [d for d in (req.kb_docs or []) if re.fullmatch(r'[\w\-.]{1,120}', d)][:20])
     schedule(job_id)
     return {"job_id": job_id, "session_id": session_id, "model": alias, "status": "queued"}
 
