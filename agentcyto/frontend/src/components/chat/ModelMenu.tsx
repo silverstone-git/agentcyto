@@ -1,4 +1,4 @@
-import { RotateCcw, KeyRound, Check } from 'lucide-react'
+import { RotateCcw, KeyRound, Check, Sparkles, Globe } from 'lucide-react'
 import type { ModesConfig } from '../../lib/api'
 import { ChatSettings, DEFAULT_SETTINGS, Provider } from '../../lib/providers'
 
@@ -17,6 +17,24 @@ const chip = (on: boolean) =>
     : 'border-surface-border text-ink-300 hover:bg-surface-border'}`
 
 const label = 'text-[11px] font-semibold uppercase tracking-wide text-ink-500 mb-1.5'
+
+function Toggle({ on, onClick, icon, title, desc, disabled }: {
+  on: boolean; onClick: () => void; icon: React.ReactNode; title: string; desc: string; disabled?: boolean
+}) {
+  return (
+    <button type="button" role="switch" aria-checked={on} onClick={onClick} disabled={disabled}
+      className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl text-left hover:bg-surface-border disabled:opacity-40 disabled:hover:bg-transparent">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <span className="flex-1 min-w-0">
+        <span className="block text-sm text-ink-100">{title}</span>
+        <span className="block text-[11px] text-ink-500 leading-snug">{desc}</span>
+      </span>
+      <span className={`mt-0.5 shrink-0 w-9 h-5 rounded-full p-0.5 transition-colors ${on ? 'bg-brand-500' : 'bg-surface-border'}`}>
+        <span className={`block w-4 h-4 rounded-full bg-white transition-transform ${on ? 'translate-x-4' : ''}`} />
+      </span>
+    </button>
+  )
+}
 
 export default function ModelMenu({ settings, onChange, modes, providers, onProviderModel, onManageProviders }: Props) {
   const provider = providers.find((p) => p.id === settings.providerId)
@@ -91,6 +109,19 @@ export default function ModelMenu({ settings, onChange, modes, providers, onProv
           </div>
         </>
       )}
+
+      <div>
+        <div className={label}>Search &amp; retrieval</div>
+        <div className="-mx-1 space-y-0.5">
+          <Toggle on={settings.llmSearch} onClick={() => onChange({ llmSearch: !settings.llmSearch })}
+            icon={<Sparkles className="w-4 h-4 text-brand-400" />} title="LLM-assisted search"
+            desc={`${modes?.retrieval?.model || 'A fast model'} reads the book outlines, plans precise searches and reranks passages. Uses extra tokens; off = keyword search only.`} />
+          <Toggle on={settings.webSearch} onClick={() => onChange({ webSearch: !settings.webSearch })}
+            disabled={modes?.web_search_available === false && !settings.webSearch}
+            icon={<Globe className="w-4 h-4 text-success" />} title="Web search"
+            desc={modes?.web_search_available === false ? 'Not configured on the server (BRAVE_API_KEY missing).' : 'Search the web and read the top pages (Wikipedia etc.); cited as clickable sources.'} />
+        </div>
+      </div>
 
       <div>
         <div className={label}>System instructions</div>

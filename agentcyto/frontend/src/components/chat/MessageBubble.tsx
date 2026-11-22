@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Loader2, Reply, CornerUpLeft } from 'lucide-react'
+import { Loader2, Reply, CornerUpLeft, Globe, ExternalLink } from 'lucide-react'
 import Markdown from './Markdown'
 
 type MessageBubbleProps = {
@@ -7,7 +7,7 @@ type MessageBubbleProps = {
   content: string
   model?: string
   meta?: { attempt?: number | null; streaming?: boolean }
-  citations?: number
+  sources?: any[] // retrieval hits: [n] in the text refers to sources[n-1]
   onCite?: (n: number) => void
   onReply?: () => void
 }
@@ -36,7 +36,13 @@ export function QuoteChip({ who, quote, onClear }: { who: 'user' | 'assistant'; 
   )
 }
 
-export default function MessageBubble({ role, content, model, meta, citations = 0, onCite, onReply }: MessageBubbleProps) {
+export default function MessageBubble({ role, content, model, meta, sources = [], onCite, onReply }: MessageBubbleProps) {
+  const citations = sources.length
+  const webHits = sources.filter((h) => h.kind === 'web' && h.url)
+  const webSet = new Set<number>(webHits.map((h) => h.n))
+  // Only list web pages the answer actually cited (all of them while streaming / if none cited).
+  const cited = new Set<number>(Array.from(content.matchAll(/\[(\d{1,2})\]/g), (m) => parseInt(m[1], 10)))
+  const shownWeb = webHits.some((h) => cited.has(h.n)) ? webHits.filter((h) => cited.has(h.n)) : webHits
   const isUser = role === 'user'
   const reply = isUser ? parseReply(content) : null
   const body = reply ? reply.body : content
@@ -89,7 +95,22 @@ export default function MessageBubble({ role, content, model, meta, citations = 
         {reply && <div className="mb-2"><QuoteChip who={reply.who} quote={reply.quote} /></div>}
         {isUser
           ? <div className="whitespace-pre-wrap">{body}</div>
-          : <Markdown text={body} citations={citations} onCite={onCite} />}
+          : <Markdown text={body} citations={citations} onCite={onCite} web={webSet} />}
+        {!isUser && shownWeb.length > 0 && (
+          <div className="mt-3 pt-2 border-t border-surface-border/50">
+            <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-ink-500 mb-1.5"><Globe className="w-3 h-3" /> Web sources</div>
+            <div className="flex flex-wrap gap-1.5">
+              {shownWeb.map((h) => (
+                <a key={h.n} href={h.url} target="_blank" rel="noreferrer noopener" title={h.title || h.url}
+                  className="inline-flex items-center gap-1.5 max-w-full sm:max-w-[18rem] pl-1 pr-2 py-0.5 rounded-full bg-success/10 border border-success/30 text-[11px] text-ink-200 hover:bg-success/20">
+                  <span className="cite-chip cite-web !m-0 !cursor-pointer">{h.n}</span>
+                  <span className="truncate"><span className="text-ink-400">{h.site}</span>{h.title ? ` · ${h.title}` : ''}</span>
+                  <ExternalLink className="w-3 h-3 shrink-0 text-ink-500" />
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
         {!isUser && meta && (
           <div className="mt-3 pt-2 border-t border-surface-border/50 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-[10px] text-ink-600">{metaItems}</div>

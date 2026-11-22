@@ -54,11 +54,14 @@ export interface ChatSettings {
   systemPrompt: string
   temperature: number | null
   maxTokens: number | null
+  llmSearch: boolean // LLM plans the KB search and reranks passages (more tokens, much better recall)
+  webSearch: boolean // also search the web (Brave) and scrape top pages
 }
 
 export const DEFAULT_SETTINGS: ChatSettings = {
   mode: 'heavy', role: 'chat', model: '', providerId: '',
   systemPrompt: '', temperature: null, maxTokens: null,
+  llmSearch: true, webSearch: false,
 }
 
 const SETTINGS_KEY = 'agentcyto.settings'

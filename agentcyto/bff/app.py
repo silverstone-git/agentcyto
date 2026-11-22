@@ -24,7 +24,9 @@ from pydantic import BaseModel, Field
 
 from db import DB, clear_gateway_sessions
 from kb import get_kb, KB
+from retrieval import Retriever
 import byok
+import websearch
 
 KB_SOURCE_DIR = os.environ.get("KB_SOURCE_DIR", "/kb-source")
 KB_INGEST_TIMEOUT = int(os.environ.get("KB_INGEST_TIMEOUT_SECONDS", "3600"))
@@ -131,95 +133,18 @@ def estimate_cost(model: str | None, usage: dict | None) -> float:
     return round(rate * tokens / 1_000_000, 6)
 
 
-_STOP = set("a an and are as at be but by can could do does for from how i if in into is it its me my of on or our so than that the their then there these this to was we what when where which who why will with would you your explain tell about please give show describe using use find derive".split())
-
-
-_HEADING_TYPES = {"document", "chapter", "section", "subsection", "subsubsection"}
-
-
-def _terms(text: str) -> list[str]:
-    seen: list[str] = []
-    for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text.lower()):
-        if w not in _STOP and w not in seen:
-            seen.append(w)
-    return seen[:10]
-
-
-def _kb_search(doc_ids: list[str], match: str, per_doc: int) -> list[dict]:
-    kb = get_kb(db)
-    hits: list[dict] = []
-    for d in doc_ids:
-        try:
-            hits += kb.db.kb_search_fts(match, limit=per_doc * 4, doc_id=d)
-        except sqlite3.Error:
-            continue
-    hits.sort(key=lambda h: h["rank"])  # bm25: lower is better
-    # Headings match query words but carry no content; prefer real passages.
-    body = [h for h in hits if h["type"] not in _HEADING_TYPES]
-    return (body or hits)[: per_doc * max(1, len(doc_ids))]
-
-
-async def retrieve_kb_context(job_id: str, doc_ids: list[str], session_id: str) -> str:
-    """Retrieve from attached KB docs with SQLite FTS5 (bm25) and trace every step."""
-    def tr(step: str, text: str, **extra):
-        db.add_event(job_id, "trace", {"step": step, "text": text, **extra})
-
-    msgs = db.get_history(session_id)
-    question = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
-    kb = get_kb(db)
-    titles = {}
-    for d in kb.db.kb_list_documents():
-        titles[d["id"]] = d.get("title") or d["id"]
-    doc_ids = [d for d in doc_ids if d in titles]
-    if not doc_ids:
-        tr("decision", "Attached KB docs not found; answering without retrieval.")
+async def retrieve_context(job_id: str, job: dict, opts: dict) -> str:
+    """Structure-aware KB (+ optional web) retrieval; see retrieval.py for the pipeline."""
+    doc_ids = json.loads(job["kb_docs"]) if job.get("kb_docs") else []
+    web = bool(opts.get("web_search"))
+    if not doc_ids and not web:
         return ""
-    tr("decision", f"{len(doc_ids)} KB document(s) attached, so I search them before answering.",
-       docs=[titles[d] for d in doc_ids])
-    terms = _terms(question)
-    if not terms:
-        tr("decision", "No searchable keywords in the question; skipping retrieval.")
-        return ""
-    tr("method", "SQLite FTS5 full-text search, ranked by bm25 (no shell command, no embeddings).",
-       tool="kb_search_fts")
-    # Strategy 1: all key terms (AND); strategy 2: any term (OR), prefix-matched.
-    attempts = [("AND", " AND ".join(f'"{t}"' for t in terms[:4])),
-                ("OR", " OR ".join(f'"{t}"*' for t in terms))]
-    hits: list[dict] = []
-    for label, match in attempts:
-        hits = await asyncio.to_thread(_kb_search, doc_ids, match, 6)
-        tr("search", f"{label} query returned {len(hits)} hit(s)", query=match,
-           sql="SELECT ... FROM kb_node_fts MATCH ? ORDER BY bm25(kb_node_fts)")
-        if len(hits) >= 3:
-            break
-        if label == "AND":
-            tr("decision", "Too few hits with all terms; broadening to any-term OR search.")
-    if not hits:
-        tr("decision", "Nothing relevant found in the attached KB; answering from general knowledge.")
-        return ""
-    picked = hits[:8]
-    parts, used, total = [], [], 0
-    for i, h in enumerate(picked, 1):
-        sec = kb.db.kb_get_node(h["parent_id"]) if h.get("parent_id") else None
-        where = f"{titles.get(h['document_id'], h['document_id'])}"
-        if sec and sec.get("title"):
-            where += f" / {sec['title'][:80]}"
-        body = (h.get("latex") or h.get("content") or "")[:1200]
-        label = f" eq {h['label']}" if h.get("label") else ""
-        chunk = f"[{i}] ({h['type']}{label}; {where}; lines {h['line_start']}-{h['line_end']})\n{body}"
-        if total + len(chunk) > 9000:
-            break
-        parts.append(chunk)
-        total += len(chunk)
-        used.append({"n": i, "type": h["type"], "doc": titles.get(h["document_id"]),
-                     "section": (sec or {}).get("title"), "label": h.get("label"),
-                     "lines": f"{h['line_start']}-{h['line_end']}", "preview": body[:160],
-                     "text": body, "node_id": h["id"]})
-    db.add_event(job_id, "retrieval", {"method": "fts5-bm25", "terms": terms, "hits": used})
-    tr("decision", f"Injecting top {len(parts)} passage(s) into the model context.")
-    return ("Reference passages retrieved from the user's attached knowledge base. Prefer them "
-            "when relevant and cite as [n]; say so if they do not cover the question.\n\n"
-            + "\n\n".join(parts))
+    r = Retriever(db=db, kb=get_kb(db), job_id=job_id, session_id=job["session_id"],
+                  gateway_url=GATEWAY_URL, master_key=MASTER_KEY, cfg=modes.get("retrieval") or {},
+                  llm=opts.get("llm_search", True) is not False, web=web,
+                  price=lambda m, u: estimate_cost(m, u))
+    ctx, _ = await r.run(doc_ids, db.get_history(job["session_id"]))
+    return ctx
 
 
 async def run_job(job_id: str) -> None:
@@ -236,9 +161,9 @@ async def run_job(job_id: str) -> None:
     if opts.get("system_prompt"):
         system_prompt = SYSTEM_PROMPT + "\n\nUser's custom instructions:\n" + opts["system_prompt"]
     kb_ctx = ""
-    if job.get("kb_docs"):
+    if job.get("kb_docs") or opts.get("web_search"):
         try:
-            kb_ctx = await retrieve_kb_context(job_id, json.loads(job["kb_docs"]), job["session_id"])
+            kb_ctx = await retrieve_context(job_id, job, opts)
         except Exception as exc:  # noqa: BLE001 - retrieval must never kill the chat
             db.add_event(job_id, "trace", {"step": "error", "text": f"retrieval failed: {exc}"[:300]})
             kb_ctx = ""
@@ -368,6 +293,9 @@ async def lifespan(app: FastAPI):
     load_modes()
     restore_jobs()
     kb = get_kb(db)
+    if kb.fts_outdated() and kb.db.kb_list_documents():
+        # Stemmed + breadcrumb index (fts_version 2): rebuild once in the background.
+        app.state.fts_task = asyncio.create_task(asyncio.to_thread(kb.migrate_index))
     if Path(KB_SOURCE_DIR).exists():
         files = list(kb.source_files())
         if files:
@@ -405,6 +333,8 @@ class ChatRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=200_000)
     byok: dict | None = None  # {api_type, base_url, api_key, model, label}: user's own provider
+    llm_search: bool = True    # LLM plans the KB search and reranks passages
+    web_search: bool = False   # also search the web (Brave) and scrape top pages
 
 
 class CompressRequest(BaseModel):
@@ -451,7 +381,7 @@ async def models():
 
 @app.get("/api/modes")
 async def get_modes():
-    return modes
+    return {**modes, "web_search_available": websearch.available()}
 
 
 @app.post("/api/admin/reload")
@@ -548,6 +478,10 @@ async def chat(req: ChatRequest):
         options["temperature"] = req.temperature
     if req.max_tokens:
         options["max_tokens"] = req.max_tokens
+    if not req.llm_search:
+        options["llm_search"] = False
+    if req.web_search:
+        options["web_search"] = True
     session_id = check_session(req.session_id) if req.session_id else uuid.uuid4().hex
     if not db.get_session(session_id):
         db.create_session(session_id, " ".join((req.name or req.message).split())[:48])

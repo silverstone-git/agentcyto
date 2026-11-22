@@ -68,6 +68,24 @@ NODE_TYPES = {
 
 # Heading level -> node type
 HEADING_TYPE = {1: "chapter", 2: "section", 3: "subsection", 4: "subsubsection"}
+HEADING_TYPES = {"document", *HEADING_TYPE.values()}
+HEADING_LEVEL = {"document": 0, **{v: k for k, v in HEADING_TYPE.items()}}
+
+_JUNK_HEADING_RE = re.compile(
+    r"^\W*(index|subject index|author index|name index|contents|table of contents|"
+    r"bibliography|references|further reading|selected bibliography|acknowledg\w*|"
+    r"list of (figures|tables|symbols)|copyright\b.*)\W*$", re.I)
+_PAGE_REF_RE = re.compile(r"[,–-]\s*\d{1,4}(?:\s*[–-]\s*\d{1,4})?(?=\s|,|$|;)")
+
+
+def is_junk_node(text: str, trail: list[str]) -> bool:
+    """Back-of-book index pages, TOCs and bibliographies: lots of words, no content.
+    Only the nearest heading counts: mis-levelled books put whole chapters under
+    e.g. "CONTENTS", and those chapters' own sections must stay searchable."""
+    if trail and _JUNK_HEADING_RE.match(_strip_markers(trail[-1] or "")):
+        return True
+    refs = len(_PAGE_REF_RE.findall(text))
+    return refs >= 5 and refs * 40 >= len(text)
 
 MAX_NODE_CONTENT = 200_000
 
@@ -244,6 +262,10 @@ class _ParserState:
     def _add_heading(self, level: int, text: str, line_no: int) -> str:
         node_type = HEADING_TYPE.get(level, "section")
         title = _strip_markers(text).strip()
+        # Pop deeper-or-equal levels first so the parent is the enclosing heading,
+        # not the previous sibling (fixed 2026-11-22; see repair_heading_parents).
+        while len(self.section_stack) > 1 and self.section_stack[-1][0] >= level:
+            self.section_stack.pop()
         node_id = _node_id(self.doc_id, node_type, self._next_ordinal())
         self.nodes.append({
             "id": node_id,
@@ -260,9 +282,6 @@ class _ParserState:
             "provenance": "extracted",
             "confidence": 1.0,
         })
-        # Rebuild section stack: pop deeper or equal levels
-        while len(self.section_stack) > 1 and self.section_stack[-1][0] >= level:
-            self.section_stack.pop()
         self.section_stack.append((level, node_id))
         self._attach_to_section(node_id)
         return node_id
@@ -637,30 +656,108 @@ class KB:
         return {"status": "cleared"}
 
     # -- FTS5 ------------------------------------------------------------ #
+    # Each FTS row = node text + its breadcrumb ("Doc › Chapter › Section › title"),
+    # so passages match the topic of the section they live in. Back-of-book
+    # indexes, tables of contents and bibliographies are left out of the index.
 
-    def _rebuild_fts_for_document(self, doc_id: str) -> None:
-        with self.db.conn() as c:
+    FTS_VERSION = "2"
+
+    def _fts_rows(self, c, doc_id: str | None = None) -> list[tuple[str, str, str]]:
+        where = "WHERE document_id=?" if doc_id else ""
+        args = (doc_id,) if doc_id else ()
+        titles = {r["id"]: (r["title"] or r["id"]) for r in c.execute(
+            f"SELECT id, title FROM kb_documents {where.replace('document_id', 'id')}", args)}
+        rows = c.execute(
+            f"SELECT id, document_id, type, title, content, parent_id FROM kb_nodes {where}",
+            args).fetchall()
+        by_id = {r["id"]: r for r in rows}
+        crumbs: dict[str, list[str]] = {}
+
+        def path(nid: str | None, depth: int = 0) -> list[str]:
+            if not nid or nid not in by_id or depth > 12:
+                return []
+            if nid in crumbs:
+                return crumbs[nid]
+            n = by_id[nid]
+            own = [n["title"]] if n["type"] in HEADING_TYPES and n["title"] else []
+            crumbs[nid] = path(n["parent_id"], depth + 1) + own
+            return crumbs[nid]
+
+        out = []
+        for r in rows:
+            text = r["content"] or ""
+            if not text.strip() or r["type"] == "document":
+                continue
+            trail = path(r["parent_id"])
+            if r["type"] not in HEADING_TYPES and r["title"]:
+                trail = trail + [r["title"]]
+            if is_junk_node(text, trail):
+                continue
+            crumb = " › ".join([titles.get(r["document_id"], r["document_id"])]
+                               + [_strip_markers(t)[:120] for t in trail])
+            out.append((r["id"], text, crumb))
+        return out
+
+    def _rebuild_fts_for_document(self, doc_id: str) -> int:
+        """Re-index one document, committing in chunks so the WAL stays small."""
+        c = self.db.conn()
+        with c:
             c.execute("DELETE FROM kb_node_fts WHERE node_id IN "
                       "(SELECT id FROM kb_nodes WHERE document_id=?)", (doc_id,))
-            rows = c.execute(
-                "SELECT id, content, title FROM kb_nodes WHERE document_id=? "
-                "AND content IS NOT NULL AND trim(content)!=''", (doc_id,)
-            ).fetchall()
-            for r in rows:
-                c.execute(
-                    "INSERT INTO kb_node_fts (node_id, content, title) VALUES (?,?,?)",
-                    (r["id"], r["content"], r["title"] or ""))
+        rows = self._fts_rows(c, doc_id)
+        for i in range(0, len(rows), 4000):
+            with c:
+                c.executemany("INSERT INTO kb_node_fts (node_id, content, title) VALUES (?,?,?)",
+                              rows[i:i + 4000])
+        return len(rows)
 
-    def _rebuild_all_fts(self) -> None:
-        with self.db.conn() as c:
+    def _rebuild_all_fts(self) -> int:
+        c = self.db.conn()
+        with c:
             c.execute("DELETE FROM kb_node_fts")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        total = 0
+        for (doc_id,) in c.execute("SELECT id FROM kb_documents").fetchall():
+            total += self._rebuild_fts_for_document(doc_id)
+            c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.db.kb_meta_set("fts_version", self.FTS_VERSION)
+        return total
+
+    def repair_heading_parents(self) -> int:
+        """Older ingests linked each heading to the previous heading. Recompute parents
+        from (ordinal, level) with a stack, and the matching `contains` edges."""
+        fixed = 0
+        c = self.db.conn()
+        for (doc_id,) in c.execute("SELECT id FROM kb_documents").fetchall():
+            root = f"{doc_id}:document"
             rows = c.execute(
-                "SELECT id, content, title FROM kb_nodes WHERE content IS NOT NULL "
-                "AND trim(content)!=''").fetchall()
+                "SELECT id, type, parent_id FROM kb_nodes WHERE document_id=? AND type IN "
+                "('chapter','section','subsection','subsubsection') ORDER BY ordinal", (doc_id,)).fetchall()
+            stack: list[tuple[int, str]] = [(0, root)]
+            updates = []
             for r in rows:
-                c.execute(
-                    "INSERT INTO kb_node_fts (node_id, content, title) VALUES (?,?,?)",
-                    (r["id"], r["content"], r["title"] or ""))
+                lvl = HEADING_LEVEL[r["type"]]
+                while len(stack) > 1 and stack[-1][0] >= lvl:
+                    stack.pop()
+                if r["parent_id"] != stack[-1][1]:
+                    updates.append((stack[-1][1], r["id"]))
+                stack.append((lvl, r["id"]))
+            with c:
+                c.executemany("UPDATE kb_nodes SET parent_id=? WHERE id=?", updates)
+                c.executemany("UPDATE kb_node_edges SET source_id=? WHERE target_id=? AND rel_type='contains'",
+                              updates)
+            fixed += len(updates)
+        return fixed
+
+    def migrate_index(self) -> dict:
+        """One-off upgrade to fts_version 2: fix heading parents, then rebuild the FTS index."""
+        fixed = self.repair_heading_parents()
+        rows = self._rebuild_all_fts()
+        return {"heading_parents_fixed": fixed, "fts_rows": rows}
+
+    def fts_outdated(self) -> bool:
+        return self.db.kb_meta_get("fts_version") != self.FTS_VERSION
 
     # -- Stage B: LLM enrichment ---------------------------------------- #
 

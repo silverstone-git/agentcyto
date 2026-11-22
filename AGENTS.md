@@ -40,6 +40,9 @@ must never be forgotten, the current status and the repository map; everything e
 - **React + Vite + TypeScript + Tailwind v4 frontend** (`agentcyto/frontend` → `agentcyto/ui`): Apple-style dark UI, mobile-first drawers, streaming answers with Markdown + KaTeX, collapsible retrieval/thinking panels, clickable citations that open the source passage, KB `+` menu and chips in the composer, swipe/hover reply, per-chat rename / AI auto-name / delete, lazily created chats, system-log drawer, separate password-gated admin page for KB ingestion.
 - `cli_provider.py` scopes CLI sessions and agent workspaces to a browser session via `X-Agentcyto-Session`.
 - nginx route `/agentcyto/` with basic auth is live on `https://t.aryan.cfd/agentcyto/`.
+- **Retrieval v2** (2026-11-22): LLM-planned, outline-aware KB search + rerank (default on, toggle
+  "LLM-assisted search"), stemmed breadcrumb FTS index, optional Brave web search with page scraping
+  (globe toggle, clickable web citations). Details: `docs/knowledge-base.md` §9.7–9.8.
 - **Knowledge Base (KB)**: SQLite-only (`kb_*` tables + FTS5) compiled from `repo/physics/` by `kb.py`. Current verified totals: 13 documents, 103,039 nodes, 27,375 equations, 1,452 symbols (an earlier parser bug had dropped one-line `$$…$$` equations; fixed 2026-11-22 — see `docs/knowledge-base.md` §9.7). Attached KB docs are searched per chat turn (FTS5/bm25) and injected into the prompt; admin editing lives on a separate password-gated page (`apple` for now).
 - Git repository initialised with a baseline commit; no secret files tracked.
 
@@ -72,6 +75,8 @@ must never be forgotten, the current status and the repository map; everything e
 │   │   ├── app.py                # FastAPI routes, job worker, SSE, auth boundary + KB API
 │   │   ├── db.py                 # SQLite schema + helpers, gateway session-map cleanup + KB tables
 │   │   ├── kb.py                 # KB ingestion pipeline: markdown parser, LaTeX/symbol/equation extraction, FTS5 index
+│   │   ├── retrieval.py          # per-turn retrieval: outline → LLM plan → FTS search → expand → LLM rerank
+│   │   ├── websearch.py          # Brave search, SSRF-safe fetch, Wikipedia/HTML extraction
 │   │   ├── modes.yaml            # mode → alias mapping, budget, price estimates
 │   │   ├── requirements.txt
 │   │   └── Dockerfile            # uid 1001, serves UI from /app/ui
@@ -117,6 +122,7 @@ must never be forgotten, the current status and the repository map; everything e
     │
     ├── secrets/
     │   ├── gateway.env            # runtime secrets, chmod 600, generated from root .env
+    │   ├── bff.env                # BFF-only secrets (BRAVE_API_KEY), chmod 600, optional
     │   ├── gateway.env.example    # template
     │   ├── cli-state/             # staged host CLI credentials, chmod 700, git-ignored
     │   │   ├── claude/            # .credentials.json, settings.json

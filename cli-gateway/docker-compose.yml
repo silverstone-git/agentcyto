@@ -58,6 +58,9 @@ services:
     env_file:
       - path: secrets/gateway.env
         required: true
+      # BFF-only secrets (BRAVE_API_KEY for web search); optional.
+      - path: secrets/bff.env
+        required: false
     environment:
       GATEWAY_URL: http://gateway:4000
       CLI_WORKSPACE_DIR: /workspaces

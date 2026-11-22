@@ -108,6 +108,8 @@ export interface ModesConfig {
   chat_models: string[]
   agent_models: string[]
   price_usd_per_million: Record<string, number>
+  retrieval?: { model?: string; plan_model?: string; rerank_model?: string }
+  web_search_available?: boolean
 }
 
 export interface Health {

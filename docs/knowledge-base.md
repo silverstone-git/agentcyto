@@ -112,22 +112,63 @@ and all three volumes were titled "Feynman".
    (e.g. "Feynman Vol. 3 Quantum Mechanics") when the heading is shorter than 12 chars, matches
    "lectures on physics", or is already used by another document.
 
+4. **Headings were chained to their previous sibling.** `_add_heading` read `current_section_id()`
+   *before* popping the section stack, so every heading's `parent_id` (and `contains` edge) pointed at
+   the previous heading: the "tree" was a linked list ~500 deep. Fixed in the parser; existing rows
+   are repaired without re-ingesting by `KB.repair_heading_parents()` (3,722 rows fixed).
+5. **FTS index v2** (`kb_meta.fts_version = 2`): porter stemming (`tokenize='porter unicode61'`),
+   the `title` column now holds the breadcrumb (`Doc › Chapter › Section › …`, bm25 weight 0.5) and
+   back-of-book index pages, TOCs, bibliographies and symbol lists are left out (`is_junk_node`:
+   nearest heading is one of those, or ≥5 page references per ~200 chars). 101,778 rows indexed.
+   `DB.__init__` drops a pre-v2 FTS table and the BFF runs `KB.migrate_index()` once in the
+   background at startup (~15 s; FTS rebuilds commit per 4,000 rows so the WAL stays small; a single
+   transaction previously grew the WAL past 1 GB).
+
 After any parser change: rebuild the BFF image and `POST /api/kb/reindex` (about 4 minutes).
 
-### 9.8 Retrieval in chat (`retrieve_kb_context` in `app.py`)
+### 9.8 Retrieval in chat (`agentcyto/bff/retrieval.py`, `websearch.py`)
 
-When a chat request carries `kb_docs`, the job worker searches those docs before calling the model:
+Runs before the model call whenever a chat request carries `kb_docs` or `web_search: true`.
+Per-turn options: `llm_search` (default **true**; UI: *LLM-assisted search* in the model menu) and
+`web_search` (default false; UI: globe button + green "Web search on" chip in the composer).
+Tunables live under `retrieval:` in `modes.yaml` (model, budgets, rounds, passage sizes).
 
-1. Extract up to 10 keywords from the latest user message (stop-word filtered).
-2. Search 1: FTS5 `AND` of the first 4 terms; if fewer than 3 hits, Search 2: `OR` of all terms
-   with prefix match. Each search runs `kb_search_fts` per document (bm25 rank). Heading nodes
-   (`document/chapter/section/subsection/subsubsection`) are dropped in favour of real passages.
-3. Top ≤ 8 passages (≤ 9,000 chars total, each ≤ 1,200 chars; equations use their LaTeX) are
-   prepended to the **last user message** as `[n] (type; doc / section; lines a-b)` blocks.
-   They are *not* sent as a system message because CLI-backed models drop system messages.
-4. Streamed SSE events: `trace` (decision / method / search / error steps with the exact MATCH
-   query) and `retrieval` (method, terms, hits with full text, node ids). The UI renders them in a
-   collapsible "Knowledge-base retrieval" panel and turns `[n]` in the answer into clickable
-   citation chips that open the source passage.
+1. **Probe**: stemmed FTS5 OR-search over the question terms (stop-words removed; follow-ups with
+   < 3 terms inherit terms from the previous user turn). Hits are counted per enclosing heading.
+2. **Plan** (LLM): the planner model (`gemini-flash-lite` by default, ~2 s) receives the question,
+   the last 4 turns and a **budgeted outline** of every attached document: headings with short ids
+   (`S12`), nesting by indentation, `*N hits` marks from the probe (≤ 60k chars total; deepest
+   level that fits per document plus all hot headings and their ancestors). It returns JSON:
+   `queries` (FTS keyword queries with synonyms), `sections` (heading ids), `equation_labels`,
+   `web_queries`, `kb_needed`, `notes`. This is what makes the structure visible to the LLM.
+3. **Search**: every query runs document-wide (AND, falling back to OR) and inside each target
+   section's subtree (ordinal range `heading.ordinal < n.ordinal < heading.end`); each target
+   section's opening passages are added; equation labels are looked up directly. Lists are fused
+   with weighted reciprocal-rank fusion.
+4. **Expand**: each hit becomes a passage with neighbouring paragraphs/equations from the same
+   section (an equation always gets its introducing sentence), ≤ ~1,800 chars, with its breadcrumb.
+5. **Web** (optional, concurrent): Brave Search → top 5 pages fetched (`websearch.fetch_page`:
+   http(s) only, every redirect hop must resolve to public IPs, 2 MB cap; Wikipedia via the REST
+   Parsoid HTML endpoint with LaTeX recovered from `<math data-mw>`; other pages via a stdlib HTML
+   extractor that drops nav/footer/reference markers) → best paragraphs by term overlap. Brave's
+   snippets are used when a page cannot be fetched.
+6. **Rerank** (LLM): the model sees up to 36 KB passages + all web passages and returns the ones that
+   answer the question in reading order (≤ 8 KB, ≤ 5 web) with a short reason each; it may request
+   one more search round (`max_rounds: 2`).
+
+With `llm_search: false` (or if the LLM call fails) steps 2 and 6 are skipped and fused bm25/RRF order
+decides. Planner/reranker tokens are recorded in `usage` as `retrieval:plan` / `retrieval:rerank`.
+
+Passages are prepended to the **last user message** (CLI-backed models drop system messages) as
+`[n] KB · Doc › Chapter › Section [type; lines a-b]` or `[n] WEB · Title (site) › heading` + `URL:`;
+web text is framed as untrusted data. SSE: `trace` steps (`decision`, `search`, `plan`, `llm`,
+`rerank`, `web`, `error`) and one `retrieval` event (`hits[]` with `kind: kb|web`, `path`, `url`,
+`site`, `why`; `counts`, `method`). The UI renders a "Retrieval" panel, blue chips for KB and green
+chips for web citations, and a clickable "Web sources" footer under the answer.
+
+Measured (Shankar + Atkins, "derive hydrogen energy levels"): old flow returned index fragments and
+exercises; v2 lexical returns the right sections in ~0.5 s; LLM-assisted returns §13.1 in reading
+order (setup → radial equation → series → quantisation → $E_n$) in ~5–7 s. `gemini-flash` gives
+similar picks but takes 60 s+ per call (thinking), so it is not the default.
 
 No shell command and no embeddings are involved. Retrieval failures never fail the job.

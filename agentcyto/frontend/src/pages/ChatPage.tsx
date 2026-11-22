@@ -1,7 +1,7 @@
 import { PREFIX } from '../lib/prefix'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen, MoreHorizontal, Pencil, Trash2, Wand2, MessageSquare, Search, SlidersHorizontal, Shrink, Eraser, KeyRound } from 'lucide-react'
+import { Plus, Send, StopCircle, Loader2, FileText, Sparkles, BookOpen, MoreHorizontal, Pencil, Trash2, Wand2, MessageSquare, Search, SlidersHorizontal, Shrink, Eraser, KeyRound, Globe } from 'lucide-react'
 import { api, Message, Session, ModesConfig, SearchResult } from '../lib/api'
 import { ChatSettings, Provider, byokPayload, loadProviders, loadSettings, saveProviders, saveSettings } from '../lib/providers'
 import ModelMenu from '../components/chat/ModelMenu'
@@ -254,6 +254,8 @@ export default function ChatPage() {
     if (settings.systemPrompt.trim()) body.system_prompt = settings.systemPrompt.trim()
     if (settings.temperature !== null) body.temperature = settings.temperature
     if (settings.maxTokens) body.max_tokens = settings.maxTokens
+    if (!settings.llmSearch) body.llm_search = false
+    if (settings.webSearch) body.web_search = true
     if (provider) { body.byok = byokPayload(provider); body.role = 'chat' }
     else if (model) body.model = model
     return body
@@ -612,7 +614,7 @@ export default function ChatPage() {
                   role={msg.role}
                   content={msg.content}
                   model={msg.role === 'assistant' ? (msg.model || undefined) : undefined}
-                  citations={msg.meta?.retrieval?.hits?.length || 0}
+                  sources={msg.meta?.retrieval?.hits || []}
                   onCite={(n) => { const h = msg.meta?.retrieval?.hits?.find((x: any) => x.n === n); if (h) setCiteHit(h) }}
                   onReply={() => setReplyTo({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: cleanQuote(msg.role === 'user' ? (parseReply(msg.content)?.body ?? msg.content) : msg.content) })}
                 />
@@ -623,7 +625,7 @@ export default function ChatPage() {
                 <Trace turn={live} live />
                 <MessageBubble
                   role="assistant" content={live.text} meta={{ attempt, streaming: true }}
-                  citations={live.retrieval?.hits?.length || 0}
+                  sources={live.retrieval?.hits || []}
                   onCite={(n) => { const h = live.retrieval?.hits?.find((x: any) => x.n === n); if (h) setCiteHit(h) }}
                 />
               </div>
@@ -647,9 +649,16 @@ export default function ChatPage() {
               {replyTo && (
                 <div className="px-2 pt-2"><QuoteChip who={replyTo.role} quote={replyTo.content} onClear={() => setReplyTo(null)} /></div>
               )}
-              {attachedKb.size > 0 && (
+              {(attachedKb.size > 0 || settings.webSearch) && (
                 <div className="flex flex-nowrap items-center gap-1.5 px-3 pt-2 overflow-hidden">
-                  <BookOpen className="w-3.5 h-3.5 text-brand-400" />
+                  {settings.webSearch && (
+                    <button type="button" onClick={() => patchSettings({ webSearch: false })} title="Web search is on — click to turn off"
+                      className="inline-flex items-center gap-1 shrink-0 pl-1.5 pr-2 py-0.5 rounded-full bg-success/15 border border-success/30 text-[11px] text-success">
+                      <span className="relative flex w-1.5 h-1.5"><span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-60 animate-ping" /><span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-success" /></span>
+                      <Globe className="w-3 h-3" /> Web search on <span className="ml-0.5 opacity-70">×</span>
+                    </button>
+                  )}
+                  {attachedKb.size > 0 && <BookOpen className="w-3.5 h-3.5 shrink-0 text-brand-400" />}
                   {kbDocs.filter((d) => attachedKb.has(d.id)).slice(0, window.innerWidth < 640 ? 1 : 3).map((d) => (
                     <span key={d.id} className="inline-flex items-center gap-1 max-w-[9.5rem] sm:max-w-[13rem] shrink-0 pl-2 pr-1 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/30 text-[11px] text-brand-400">
                       <span className="truncate">{d.title || d.file_name}</span>
@@ -703,11 +712,23 @@ export default function ChatPage() {
                   </>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() => { const on = !settings.webSearch; patchSettings({ webSearch: on }); log('info', on ? 'Web search on' : 'Web search off') }}
+                disabled={modesCfg?.web_search_available === false && !settings.webSearch}
+                className={`relative h-10 w-10 shrink-0 rounded-xl flex items-center justify-center transition-colors disabled:opacity-30 ${settings.webSearch ? 'bg-success/15 text-success' : 'text-ink-400 hover:bg-surface-border'}`}
+                title={modesCfg?.web_search_available === false ? 'Web search is not configured on the server' : settings.webSearch ? 'Web search on (click to turn off)' : 'Search the web too'}
+                aria-label="Toggle web search"
+                aria-pressed={settings.webSearch}
+              >
+                <Globe className="w-[18px] h-[18px]" />
+                {settings.webSearch && <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-success ring-2 ring-surface-card" />}
+              </button>
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={replyTo ? 'Reply…' : attachedKb.size ? 'Ask about the attached knowledge base…' : 'Message agentcyto…'}
+                placeholder={replyTo ? 'Reply…' : attachedKb.size ? (settings.webSearch ? 'Ask — searching your books and the web…' : 'Ask about the attached knowledge base…') : settings.webSearch ? 'Ask — searching the web…' : 'Message agentcyto…'}
                 rows={1}
                 className="flex-1 min-w-0 resize-none bg-transparent border-none outline-none py-2 text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
                 onKeyDown={(e) => {

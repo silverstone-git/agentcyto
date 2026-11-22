@@ -30,6 +30,13 @@ Comments in the file note the NVIDIA key expires 20 May 2027.
 | `META_API_KEY` | root `META_API_KEY` | `meta/muse-spark-1.3` and contributor API model |
 | `CLAUDE_CODE_OAUTH_TOKEN` | empty | Claude auth is provided by the mounted `~/.claude/.credentials.json` instead |
 
+### 5.2a `cli-gateway/secrets/bff.env` (generated, chmod 600, optional)
+
+BFF-only secrets, loaded via a second `env_file` (`required: false`) on the `bff` service so the
+gateway never sees them. Currently `BRAVE_API_KEY` (root `BRAVE_API_KEY`) for web search. Without
+it the web-search toggle is disabled in the UI. Web fetches from search results are restricted to
+public IPs on every redirect hop (no access to `gateway:4000`, loopback or metadata endpoints).
+
 If you must inspect a value, read it inside a tool container with a script that prints length only. `scripts/check.sh` already does this.
 
 ### 5.3 `AUTHKEY`

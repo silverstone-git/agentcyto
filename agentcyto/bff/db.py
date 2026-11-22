@@ -213,7 +213,13 @@ CREATE TABLE IF NOT EXISTS kb_references (
 CREATE INDEX IF NOT EXISTS idx_kb_refs_source ON kb_references(source_node_id);
 
 -- Standalone FTS5 index over node content (managed manually on ingest/reindex).
-CREATE VIRTUAL TABLE IF NOT EXISTS kb_node_fts USING fts5(node_id, content, title);
+-- `title` holds the node's breadcrumb (doc › chapter › section › own title) so a
+-- passage matches the topic of the section it sits in. Porter stemming on.
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_node_fts USING fts5(
+  node_id UNINDEXED, content, title, tokenize='porter unicode61');
+
+-- Small key/value store for KB bookkeeping (e.g. fts_version).
+CREATE TABLE IF NOT EXISTS kb_meta (key TEXT PRIMARY KEY, value TEXT);
 
 -- Ingestion run log (one row per ingestion trigger).
 CREATE TABLE IF NOT EXISTS kb_ingestions (
@@ -237,6 +243,10 @@ class DB:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._local = threading.local()
         with self.conn() as c:
+            # Old FTS table had no stemming / breadcrumbs: drop it; app.py rebuilds it.
+            row = c.execute("SELECT sql FROM sqlite_master WHERE name='kb_node_fts'").fetchone()
+            if row and "porter" not in (row[0] or ""):
+                c.execute("DROP TABLE kb_node_fts")
             c.executescript(SCHEMA)
             for ddl in (  # lightweight migrations
                 "ALTER TABLE jobs ADD COLUMN kb_docs TEXT",            # KB docs attached to a job
@@ -635,16 +645,31 @@ class DB:
                 (node_id, node_id)).fetchall()
         return [dict(r) for r in rows]
 
+    def kb_meta_get(self, key: str) -> str | None:
+        with self.conn() as c:
+            row = c.execute("SELECT value FROM kb_meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def kb_meta_set(self, key: str, value: str) -> None:
+        with self.conn() as c:
+            c.execute("INSERT INTO kb_meta (key,value) VALUES (?,?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
     def kb_search_fts(self, query: str, limit: int = 50,
                       doc_id: str | None = None,
-                      node_type: str | None = None) -> list[dict]:
-        sql = ("SELECT n.*, bm25(kb_node_fts) AS rank "
+                      node_type: str | None = None,
+                      ordinal_range: tuple[int, int] | None = None) -> list[dict]:
+        # Column weights: node_id (unindexed) 0, content 1.0, breadcrumb title 0.5.
+        sql = ("SELECT n.*, bm25(kb_node_fts, 0.0, 1.0, 0.5) AS rank, f.title AS breadcrumb "
                "FROM kb_node_fts f JOIN kb_nodes n ON n.id=f.node_id "
                "WHERE kb_node_fts MATCH ?")
         params: list = [query]
         if doc_id:
             sql += " AND n.document_id=?"
             params.append(doc_id)
+        if ordinal_range:
+            sql += " AND n.ordinal > ? AND n.ordinal < ?"
+            params.extend(ordinal_range)
         if node_type:
             sql += " AND n.type=?"
             params.append(node_type)

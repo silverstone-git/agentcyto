@@ -36,6 +36,28 @@ modes:
     paid: false
     description: Tool-capable prefix of the light chain.
 
+# Retrieval (KB + web) used before each chat turn that has KB docs attached or
+# web search on. `model` plans the search and reranks passages (2-3 extra calls
+# per turn; disable per chat with "LLM-assisted search" in the model menu).
+# Its token usage is recorded as `retrieval:plan` / `retrieval:rerank`.
+retrieval:
+  model: gemini-flash-lite     # ~2 s per call; gemini-flash is smarter but ~60 s+ (thinking)
+  # plan_model: gemini-flash   # optional per-stage overrides
+  # rerank_model: gemini-flash
+  # reasoning_effort: low
+  timeout_seconds: 90
+  outline_chars: 60000         # table-of-contents budget shown to the planner
+  max_sections: 6
+  max_queries: 6
+  candidate_pool: 36           # passages the reranker chooses from
+  max_kb_passages: 8
+  max_web_passages: 5
+  max_rounds: 2                # reranker may request one extra search round
+  context_chars: 16000         # retrieved text injected into the answer prompt
+  passage_chars: 1800
+  web_results: 6               # Brave results per query
+  web_pages: 5                 # pages fetched and scraped per turn
+
 # Explicit model overrides accepted from /api/chat (`model` field).
 chat_models:
   - heavy

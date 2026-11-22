@@ -8,7 +8,9 @@ Tailwind CSS v4); the build output goes to `agentcyto/ui/` (committed) and is ba
 
 | File | Role |
 |---|---|
-| `bff/app.py` | FastAPI routes, job worker (`run_job`), SSE, KB API, KB retrieval, SPA fallback |
+| `bff/app.py` | FastAPI routes, job worker (`run_job`), SSE, KB API, SPA fallback |
+| `bff/retrieval.py` | per-turn retrieval: outline-aware LLM planning, FTS search, passage expansion, rerank (see `knowledge-base.md` §9.8) |
+| `bff/websearch.py` | Brave Search + SSRF-safe page fetch, Wikipedia/HTML text extraction, passage picking |
 | `bff/db.py` | SQLite schema + helpers (sessions, messages, jobs, job_events, usage, `kb_*`) |
 | `bff/kb.py` | KB ingestion (see `knowledge-base.md`) |
 | `bff/byok.py` | Bring-your-own-key upstreams (OpenAI-compatible, Anthropic, Gemini): streaming, model listing, SSRF guard |
@@ -16,7 +18,9 @@ Tailwind CSS v4); the build output goes to `agentcyto/ui/` (committed) and is ba
 
 ### Chat API
 `POST /api/chat` body: `message`, `mode`, `role` (`chat`|`agent`), optional `session_id`, `name`,
-`model`, `idempotency_key`, `kb_docs: [doc ids]`, `reply_to: {role, content}`.
+`model`, `idempotency_key`, `kb_docs: [doc ids]`, `reply_to: {role, content}`,
+`llm_search` (bool, default true) and `web_search` (bool, default false). `GET /api/modes` adds
+`web_search_available` (true when `BRAVE_API_KEY` is set) and the `retrieval` config.
 
 - A session is created on the first message (named from it, 48 chars). The UI no longer creates
   empty sessions; "New chat" only resets local state.
@@ -74,7 +78,12 @@ agentcyto/frontend
   `tailwind.config.js` is legacy and ignored by v4.
 - **Streaming:** a single live "turn" (`text`, `thinking`, `trace`, `retrieval`) is kept in a ref +
   state; on `done` it is committed to `messages` with `meta` so panels persist while the page is open.
-  (Retrieval/trace panels and citation chips are not persisted across a reload.)
+  Retrieval/trace/thinking are also saved in `messages.meta`, so panels and chips survive reloads.
+- **Retrieval UI:** `llmSearch` / `webSearch` live in `ChatSettings` (localStorage). The globe
+  button next to `+` toggles web search; while on, a pulsing green "Web search on" chip sits in the
+  composer chip row. Web citations are green chips; `CitationModal` shows the excerpt plus an
+  "Open source page" link; `MessageBubble` lists cited web pages as clickable links.
+  `linkCitations` also accepts `[3, eq. (13.1.4)]` and never touches `$…$` / `$$…$$` spans.
 - **Markdown/LaTeX** (`Markdown.tsx`): react-markdown + remark-gfm + remark-math + rehype-katex.
   Normalisation: `\(..\)`/`\[..\]` → `$`/`$$`; dangling odd `$$` dropped; every `$$…$$` becomes its
   own display block; bare `\begin{…}…\end{…}` blocks are wrapped. `[n]` → clickable `.cite-chip`.

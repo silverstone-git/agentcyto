@@ -10,11 +10,13 @@ Env key names, endpoints, critical paths and the one-line health check.
 
 ```
 Root .env:                 GEMINI_API_KEY, GEMINI_API_KEY_alt, NVIDIA_API_KEY,
-                           LITELLM_MASTER_KEY, AUTHKEY, META_API_KEY
+                           LITELLM_MASTER_KEY, AUTHKEY, META_API_KEY, BRAVE_API_KEY
 
 gateway.env:               LITELLM_MASTER_KEY, NVIDIA_NIM_API_KEY,
                            GEMINI_API_KEY, GEMINI_API_KEY_ALT,
                            META_API_KEY, CLAUDE_CODE_OAUTH_TOKEN (empty)
+
+bff.env (BFF only):        BRAVE_API_KEY (web search; optional)
 ```
 
 ### Key endpoints
