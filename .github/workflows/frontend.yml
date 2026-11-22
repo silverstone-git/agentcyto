@@ -1,0 +1,16 @@
+name: frontend
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: { run: { working-directory: agentcyto/frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit -p .
+      - name: Python compile (BFF)
+        working-directory: agentcyto/bff
+        run: python3 -m py_compile app.py db.py kb.py retrieval.py websearch.py byok.py
