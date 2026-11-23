@@ -13,4 +13,4 @@ jobs:
       - run: npx tsc --noEmit -p .
       - name: Python compile (BFF)
         working-directory: agentcyto/bff
-        run: python3 -m py_compile app.py db.py kb.py retrieval.py websearch.py byok.py
+        run: python3 -m py_compile app.py db.py kb.py retrieval.py websearch.py byok.py admin_gate.py

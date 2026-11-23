@@ -70,13 +70,16 @@ services:
       AGENCYTO_DAILY_BUDGET_USD: ${AGENCYTO_DAILY_BUDGET_USD:-}
       KB_SOURCE_DIR: /kb-source
       KB_DEFAULT_SKILL: ${KB_DEFAULT_SKILL:-physics}
+      OUTSIE_URL: ${OUTSIE_URL:-https://outsie.aryan.cfd}
     volumes:
       - ../agentcyto/state:/state
       - gateway-state:/gateway-state
       - ${WORKSPACE_DIR:-./workspace}:/workspaces
       # Knowledge Bank source. Each top-level folder is a skill: repo/physics, repo/history, ...
       # (files directly in repo/ belong to KB_DEFAULT_SKILL). Writable so the admin page can create
-      # skills and upload/delete Markdown files; the BFF confines writes to one folder level below.
+      # skills and upload/delete Markdown files; the BFF confines writes to one folder level below,
+      # and every write needs an outsie admin session (bff/admin_gate.py). The host folder must be
+      # writable by the container's APP_UID.
       - ../repo:/kb-source
     ports:
       - "127.0.0.1:${BFF_PORT:-8890}:8000"

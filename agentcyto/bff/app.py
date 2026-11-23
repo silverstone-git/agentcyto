@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -29,6 +29,8 @@ from kb import get_kb, KB, KB_DEFAULT_SKILL, INGEST_PROGRESS, skill_slug, skill_
 from retrieval import Retriever
 import byok
 import websearch
+import admin_gate
+from admin_gate import require_kb_admin
 
 KB_SOURCE_DIR = os.environ.get("KB_SOURCE_DIR", "/kb-source")
 KB_INGEST_TIMEOUT = int(os.environ.get("KB_INGEST_TIMEOUT_SECONDS", "3600"))
@@ -405,7 +407,7 @@ async def get_modes():
 
 
 @app.post("/api/admin/reload")
-async def reload_modes():
+async def reload_modes(_admin: str = Depends(require_kb_admin)):
     load_modes()
     return {"status": "reloaded"}
 
@@ -736,7 +738,8 @@ async def kb_skills():
 
 
 # ---- Skill / file management (admin page). Writes go to KB_SOURCE_DIR, which must be mounted rw.
-# None of these paths is in SERVICE_PATHS: they are reachable only behind nginx basic auth.
+# None of these paths is in SERVICE_PATHS: they are reachable only behind nginx basic auth, and every
+# one also needs an outsie admin session (X-Admin-Token, see admin_gate.py).
 
 _SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FILE_RE = re.compile(r"[\w\-. ()&,'+]{1,150}\.md")
@@ -785,7 +788,7 @@ def _writable() -> None:
 
 
 @app.post("/api/kb/skills/{skill}")
-async def kb_create_skill(skill: str):
+async def kb_create_skill(skill: str, _admin: str = Depends(require_kb_admin)):
     """Create a skill = an empty folder repo/<skill>/."""
     _check_skill(skill)
     _writable()
@@ -798,7 +801,7 @@ async def kb_create_skill(skill: str):
 
 
 @app.delete("/api/kb/skills/{skill}")
-async def kb_delete_skill(skill: str):
+async def kb_delete_skill(skill: str, _admin: str = Depends(require_kb_admin)):
     """Remove a skill: its documents from the index and its source folder."""
     _require_idle()
     _writable()
@@ -813,7 +816,7 @@ async def kb_delete_skill(skill: str):
 
 
 @app.get("/api/kb/skills/{skill}/files")
-async def kb_skill_files(skill: str):
+async def kb_skill_files(skill: str, _admin: str = Depends(require_kb_admin)):
     kb = get_kb(db)
     _check_skill(skill)
     files = await asyncio.to_thread(kb.skill_files, skill)
@@ -822,7 +825,8 @@ async def kb_skill_files(skill: str):
 
 
 @app.put("/api/kb/skills/{skill}/files/{name}")
-async def kb_upload_chunk(skill: str, name: str, request: Request, offset: int = 0, final: bool = False):
+async def kb_upload_chunk(skill: str, name: str, request: Request, offset: int = 0, final: bool = False,
+                          _admin: str = Depends(require_kb_admin)):
     """Chunked upload (each request stays under nginx's 1 MB body limit). Chunks are appended to a
     hidden .part file, which source_files() ignores; the final chunk validates UTF-8 and renames it."""
     _writable()
@@ -855,7 +859,7 @@ async def kb_upload_chunk(skill: str, name: str, request: Request, offset: int =
 
 
 @app.delete("/api/kb/skills/{skill}/files/{name}")
-async def kb_delete_file(skill: str, name: str):
+async def kb_delete_file(skill: str, name: str, _admin: str = Depends(require_kb_admin)):
     """Delete a source file and its indexed document."""
     _require_idle()
     kb = get_kb(db)
@@ -913,7 +917,7 @@ async def kb_status():
 
 
 @app.post("/api/kb/ingest")
-async def kb_ingest(skill: str | None = None):
+async def kb_ingest(skill: str | None = None, _admin: str = Depends(require_kb_admin)):
     """Ingest new/changed files: all skills, or only ?skill=history."""
     kb = get_kb(db)
     _require_idle()
@@ -940,7 +944,7 @@ async def kb_ingest(skill: str | None = None):
 
 
 @app.post("/api/kb/reindex")
-async def kb_reindex():
+async def kb_reindex(_admin: str = Depends(require_kb_admin)):
     kb = get_kb(db)
     _require_idle()
     files = kb.source_files()
@@ -964,7 +968,7 @@ async def kb_reindex():
 
 
 @app.delete("/api/kb/clear")
-async def kb_clear():
+async def kb_clear(_admin: str = Depends(require_kb_admin)):
     _require_idle()
     kb = get_kb(db)
     return kb.clear_all()
@@ -986,7 +990,7 @@ async def kb_document(doc_id: str):
 
 
 @app.delete("/api/kb/documents/{doc_id}")
-async def kb_delete_document(doc_id: str):
+async def kb_delete_document(doc_id: str, _admin: str = Depends(require_kb_admin)):
     kb = get_kb(db)
     if not kb.db.kb_get_document(doc_id):
         raise HTTPException(404, "document not found")
@@ -1082,7 +1086,7 @@ async def kb_stats():
 
 
 @app.post("/api/kb/enrich")
-async def kb_enrich(req: KBEnrichRequest):
+async def kb_enrich(req: KBEnrichRequest, _admin: str = Depends(require_kb_admin)):
     kb = get_kb(db)
     import httpx
     try:
@@ -1093,6 +1097,30 @@ async def kb_enrich(req: KBEnrichRequest):
         return result
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, str(exc)[:500])
+
+
+# --------------------------------------------------------------------------- #
+# KB admin: outsie Google sign-in (see admin_gate.py) and source-file management
+# --------------------------------------------------------------------------- #
+
+class AdminSessionRequest(BaseModel):
+    auth_code: str = Field(min_length=1, max_length=512)
+    code_verifier: str = Field(min_length=43, max_length=128)
+
+
+@app.get("/api/admin/auth-config")
+async def admin_auth_config():
+    return await admin_gate.auth_config()
+
+
+@app.post("/api/admin/session")
+async def admin_session(req: AdminSessionRequest):
+    return await admin_gate.create_session(req.auth_code, req.code_verifier)
+
+
+@app.get("/api/admin/whoami")
+async def admin_whoami(admin: str = Depends(require_kb_admin)):
+    return {"admin": admin}
 
 
 @app.get("/api/kb/ingestions")

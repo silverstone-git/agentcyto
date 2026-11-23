@@ -36,6 +36,17 @@ skill folder are found recursively; files directly in the source root belong to 
 finishes. The shell route still works: `mkdir repo/history && cp *.md repo/history/`, then press *Ingest*
 (or `POST /api/kb/ingest?skill=history`). No restart needed.
 
+**Who can change the KB.** The admin page signs in with Google through outsie (`/api/admin/auth-config`,
+`/api/admin/session` proxy outsie's `/auth/providers` and `/admin/session`); only a verified Google
+account in outsie's `OUTSIE_ADMIN_EMAILS` gets a 2-hour token. Every KB write — `POST/DELETE
+/api/kb/skills/{skill}`, `PUT/DELETE /api/kb/skills/{skill}/files/{name}` (chunked upload), `/api/kb/ingest`,
+`/reindex`, `/clear`, `/enrich`, `DELETE /api/kb/documents/{id}`, `/api/admin/reload` — plus the admin-only
+`GET /api/kb/skills/{skill}/files` listing needs `X-Admin-Token`, which the BFF checks with outsie's
+`GET /admin/whoami` (cached 60 s, fails closed). Other reads stay behind nginx basic auth; `/api/retrieve`
+and `/api/kb/skills` keep the bearer key. Setup: `OUTSIE_URL` (default `https://outsie.aryan.cfd`), `repo/`
+writable by the container's `APP_UID`, and `https://t.aryan.cfd/agentcyto/**` in the Supabase project's
+Auth redirect URLs.
+
 **Skill / file management API** (behind nginx basic auth only — none of these paths is a bearer
 `SERVICE_PATH`, and the create route deliberately is *not* `POST /api/kb/skills`, which nginx exposes
 without basic auth):
@@ -74,10 +85,10 @@ location = /agentcyto/api/kb/skills {
 
 ### 9.1 Design principles
 
-- **Admin-only uploads.** Skills and files are created, uploaded and deleted only from the
-  password-gated admin page (behind nginx basic auth). Chat users never write to the source. The
-  parser never modifies source files; repo/* is git-ignored, so deleting a file from the admin page
-  is permanent.
+- **Admin-only uploads.** Skills and files are created, uploaded and deleted only from the admin page
+  (nginx basic auth + outsie Google sign-in, see above). Chat users never write to the source. File and
+  skill names are validated and writes stay one folder level below `/kb-source`. The parser never modifies
+  source files; repo/* is git-ignored, so deleting a file from the admin page is permanent.
 - **SQLite-only.** All derived data lives in `kb_*` tables in `agentcyto/state/agentcyto.db`
   (WAL mode). Full-text search uses SQLite FTS5 (`kb_node_fts`).
 - **Three provenance categories preserved independently:** source facts, extracted structure,
@@ -137,7 +148,7 @@ KB *editing* can never happen from the chat page:
   (All / None). Attached docs show as chips above the input (one row; extra ones collapse into
   "+N more"), the placeholder changes, and the doc ids are sent as `kb_docs` with each chat request.
   The sidebar also lists the docs for quick toggling.
-- **Admin page** (`/admin`, soft password `apple`, remembered for the browser tab): titled
+- **Admin page** (`/admin`, outsie Google sign-in, token kept for the browser tab): titled
   **Knowledge Bank** — users never see "KB". There's a skills list (or a horizontal scroller on mobile)
   and a selected-skill panel with a 3-step tracker (Add documents → Ingest → Use in chat), a drag-and-drop
   upload area with per-file progress, an auto-ingest toggle, and a document list with per-file state

@@ -1,14 +1,33 @@
 import { PREFIX } from './prefix'
+import { getAdminSession, adminSignOut } from './adminAuth'
 const BASE = PREFIX
+
+/** X-Admin-Token for KB writes (verified by the BFF against outsie), when signed in. */
+function adminHeaders(): Record<string, string> {
+  const admin = getAdminSession()
+  return admin ? { 'X-Admin-Token': admin.token } : {}
+}
+
+/** Only an expired/revoked admin token ends the admin session (not e.g. a basic-auth 401). */
+async function checkAdminExpired(res: Response) {
+  if (res.status !== 401 || !getAdminSession()) return
+  const body = await res.clone().json().catch(() => ({}))
+  if (/admin sign-in/i.test(String(body?.detail ?? ''))) {
+    adminSignOut()
+    window.dispatchEvent(new Event('agentcyto-admin-signed-out'))
+  }
+}
 
 async function apiJson(path: string, options: RequestInit = {}): Promise<any> {
   const res = await fetch(`${BASE}/api/${path}`, {
+    ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...adminHeaders(),
       ...options.headers,
     },
-    ...options,
   })
+  await checkAdminExpired(res)
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -272,9 +291,10 @@ export async function kbUploadFile(skill: string, name: string, file: Blob, onPr
     const final = offset + chunk.size >= file.size
     const res = await fetch(`${url}?offset=${offset}${final ? '&final=true' : ''}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/octet-stream' },
+      headers: { 'Content-Type': 'application/octet-stream', ...adminHeaders() },
       body: chunk,
     })
+    await checkAdminExpired(res)
     if (!res.ok) {
       let detail = res.status === 413 ? 'File chunk rejected by the server (too large).' : res.statusText
       try { detail = (await res.json()).detail || detail } catch (_) { /* keep */ }

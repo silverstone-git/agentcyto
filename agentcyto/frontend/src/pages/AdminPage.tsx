@@ -20,6 +20,7 @@ import {
   Library,
   Loader2,
   Lock,
+  LogOut,
   MessageSquare,
   Plus,
   RefreshCw,
@@ -29,9 +30,8 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
+import { adminSignOut, completeAdminSignIn, getAdminSession, startAdminSignIn, type AdminSession } from '../lib/adminAuth'
 
-const ADMIN_PASSWORD = 'apple'
-const UNLOCK_KEY = 'agentcyto.admin.unlocked'
 const AUTO_INGEST_KEY = 'agentcyto.admin.autoIngest'
 
 // --------------------------------------------------------------------------- //
@@ -41,8 +41,7 @@ const AUTO_INGEST_KEY = 'agentcyto.admin.autoIngest'
 function store(key: string, value?: string): string | null {
   try {
     if (value === undefined) return sessionStorage.getItem(key) ?? localStorage.getItem(key)
-    if (key === UNLOCK_KEY) sessionStorage.setItem(key, value)
-    else localStorage.setItem(key, value)
+    localStorage.setItem(key, value)
   } catch { /* storage unavailable */ }
   return null
 }
@@ -205,54 +204,74 @@ function ConfirmModal({ spec, onClose }: { spec: ConfirmSpec | null; onClose: ()
 }
 
 // --------------------------------------------------------------------------- //
-// Lock screen
+// Sign-in gate (outsie Google admin session)
 // --------------------------------------------------------------------------- //
 
 export default function AdminPage() {
-  const [unlocked, setUnlocked] = useState(() => store(UNLOCK_KEY) === '1')
-  const [password, setPassword] = useState('')
-  const [wrong, setWrong] = useState(false)
+  const [session, setSession] = useState<AdminSession | null>(getAdminSession)
+  const [checking, setChecking] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
 
-  if (!unlocked) {
+  useEffect(() => {
+    completeAdminSignIn()
+      .then((s) => { if (s) setSession(s) })
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setChecking(false))
+    const out = () => setSession(null)
+    window.addEventListener('agentcyto-admin-signed-out', out)
+    return () => window.removeEventListener('agentcyto-admin-signed-out', out)
+  }, [])
+
+  if (checking) {
+    return (
+      <div className="min-h-full flex items-center justify-center p-4 text-ink-500 text-sm gap-2">
+        <Loader2 className="w-4 h-4 animate-spin" /> Checking sign-in…
+      </div>
+    )
+  }
+
+  if (!session) {
     return (
       <div className="min-h-full flex items-center justify-center p-4">
         <div className="relative w-full max-w-sm">
           <div className="absolute -inset-10 bg-brand-500/10 blur-3xl rounded-full" aria-hidden />
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (password === ADMIN_PASSWORD) { store(UNLOCK_KEY, '1'); setUnlocked(true) } else setWrong(true)
-            }}
-            className={`relative card p-8 space-y-5 ${wrong ? 'shake' : ''}`}
-            onAnimationEnd={() => setWrong(false)}
-          >
+          <div className="relative card p-8 space-y-5">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-brand-500 to-brand-900 flex items-center justify-center text-white shadow-glow">
               <Library className="w-6 h-6" />
             </div>
             <div>
               <h2 className="text-xl font-semibold text-ink-50">Knowledge Bank</h2>
-              <p className="text-ink-500 text-sm mt-1">Enter the admin password to manage skills and documents.</p>
+              <p className="text-ink-500 text-sm mt-1">
+                Sign in with a Google account on the admin list to manage skills and documents.
+                Every change is checked by the server.
+              </p>
             </div>
-            <div className="relative">
-              <Lock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-600" />
-              <input
-                type="password"
-                autoFocus
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="field pl-9"
-                placeholder="Password"
-                aria-label="Admin password"
-              />
-            </div>
-            {wrong && <p className="text-xs text-danger flex items-center gap-1.5"><AlertTriangle className="w-3 h-3" /> That password isn't right.</p>}
-            <button type="submit" className="btn-primary w-full">Unlock</button>
-          </form>
+            {error && <p className="text-xs text-danger flex items-center gap-1.5"><AlertTriangle className="w-3 h-3" /> {error}</p>}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => { setBusy(true); try { await startAdminSignIn() } catch (e) { setError((e as Error).message); setBusy(false) } }}
+              className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              <Lock className="w-4 h-4" /> Continue with Google
+            </button>
+          </div>
         </div>
       </div>
     )
   }
-  return <AdminBody />
+  return (
+    <>
+      <div className="flex items-center justify-end gap-3 px-4 pt-3 text-xs text-ink-500">
+        <span className="truncate">Signed in as {session.email}</span>
+        <button type="button" onClick={() => { adminSignOut(); setSession(null) }} className="flex items-center gap-1 hover:text-danger shrink-0">
+          <LogOut className="w-3 h-3" /> Sign out
+        </button>
+      </div>
+      <AdminBody />
+    </>
+  )
 }
 
 // --------------------------------------------------------------------------- //
