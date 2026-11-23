@@ -142,6 +142,8 @@ body {
   box-shadow: 0 6px 20px -6px rgba(10, 132, 255, 0.55);
 }
 
+/* In the components layer so Tailwind utilities (pl-9, !py-1.5, w-full…) can override them. */
+@layer components {
 .field {
   width: 100%;
   padding: 0.6rem 0.85rem;
@@ -177,6 +179,7 @@ body {
 }
 .btn-icon:hover:not(:disabled) { background: var(--color-surface-border); color: var(--color-ink-100); }
 .btn-icon:disabled { cursor: not-allowed; }
+}
 
 .pop-in { animation: popIn .22s cubic-bezier(.2,.9,.3,1.2) both; }
 @keyframes popIn {

@@ -228,7 +228,7 @@ export const api = {
   kbDocument: (id: string) => apiGet(`kb/documents/${id}`),
   kbDeleteDocument: (id: string) => apiDelete(`kb/documents/${id}`),
   kbIngest: (skill?: string) => apiPost(skill ? `kb/ingest?skill=${encodeURIComponent(skill)}` : 'kb/ingest', {}),
-  kbSkills: () => apiGet('kb/skills') as Promise<{ skills: KbSkill[]; default: string }>,
+  kbSkills: () => apiGet('kb/skill-list') as Promise<{ skills: KbSkill[]; default: string }>,
   kbReindex: () => apiPost('kb/reindex', {}),
   kbClear: () => apiDelete('kb/clear'),
   kbSearch: (params: { q?: string; type?: string; doc?: string; limit?: number }) => {

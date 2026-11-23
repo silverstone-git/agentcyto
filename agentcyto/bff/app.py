@@ -717,7 +717,11 @@ def _expand_kb(docs: list[str] | None, skills: list[str] | None) -> list[str]:
 
 
 @app.get("/api/kb/skills")
+@app.get("/api/kb/skill-list")
 async def kb_skills():
+    # Two paths on purpose: nginx exposes /api/kb/skills *without* basic auth (bearer-only, for
+    # outstagram), so a browser can never authenticate there. The admin page uses /api/kb/skill-list,
+    # which goes through the basic-auth location like every other dashboard call.
     """Skills = top-level folders of the KB source. Ingested counts plus folders not ingested yet."""
     kb = get_kb(db)
     on_disk = kb.source_skills()

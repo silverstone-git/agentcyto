@@ -42,6 +42,8 @@ without basic auth):
 
 | Endpoint | Method | Purpose |
 |---|---|---|
+| `/api/kb/skill-list` | GET | same payload as `GET /api/kb/skills`, for the browser. nginx serves `/api/kb/skills` without basic auth
+  (bearer-only, for outstagram), so the dashboard could never authenticate there |
 | `/api/kb/skills/{skill}` | POST | create the folder `repo/<skill>/` (slug `[a-z0-9-]`, 409 if it exists) |
 | `/api/kb/skills/{skill}` | DELETE | drop the skill's documents from the index **and delete its folder** |
 | `/api/kb/skills/{skill}/files` | GET | files on disk with state `ready / new / changed / failed / missing` |
