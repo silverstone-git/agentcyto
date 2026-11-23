@@ -52,6 +52,10 @@ def skill_of(path: Path) -> str:
 
 def skill_title(skill: str) -> str:
     return skill.replace("-", " ").title()
+
+
+# ingestion_id -> {"total", "done", "current", "failed"}: live progress for the admin UI.
+INGEST_PROGRESS: dict[str, dict] = {}
 DB_PATH = os.environ.get("AGENCYTO_DB", "/state/agentcyto.db")
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +501,57 @@ class KB:
             out = [p for p in out if skill_of(p) == skill]
         return sorted(out)
 
+    @staticmethod
+    def skill_dir(skill: str) -> Path | None:
+        """Existing folder of a skill (folder names are slugged, so 'Organic Chemistry/' is
+        'organic-chemistry'), or None."""
+        if not KB_SOURCE_DIR.exists():
+            return None
+        for d in KB_SOURCE_DIR.iterdir():
+            if d.is_dir() and not d.name.startswith(".") and skill_slug(d.name) == skill:
+                return d
+        return None
+
+    def skill_files(self, skill: str) -> list[dict]:
+        """Source files of a skill with their ingestion state, plus indexed documents whose
+        source file is gone. state: ready | changed | new | failed | missing."""
+        docs = {d["id"]: d for d in self.db.kb_list_documents() if (d.get("skill") or KB_DEFAULT_SKILL) == skill}
+        out = []
+        for path in self.source_files(skill):
+            doc_id = _doc_id_from_path(path)
+            st = path.stat()
+            doc = docs.pop(doc_id, None)
+            if not doc:
+                state = "new"
+            elif doc.get("status") == "failed":
+                state = "failed"
+            elif doc.get("file_hash") != self._cached_hash(path, st):
+                state = "changed"
+            else:
+                state = "ready"
+            out.append({"file_name": path.name, "doc_id": doc_id, "size": st.st_size, "modified": st.st_mtime,
+                        "state": state, "title": (doc or {}).get("title") or self._pretty_stem(path),
+                        "nodes": int((doc or {}).get("node_count") or 0),
+                        "equations": int((doc or {}).get("equation_count") or 0),
+                        "error": (doc or {}).get("error"), "ingested_at": (doc or {}).get("ingested_at")})
+        for doc in docs.values():
+            out.append({"file_name": doc.get("file_name"), "doc_id": doc["id"], "size": doc.get("file_size") or 0,
+                        "modified": None, "state": "missing", "title": doc.get("title") or doc.get("file_name"),
+                        "nodes": int(doc.get("node_count") or 0), "equations": int(doc.get("equation_count") or 0),
+                        "error": None, "ingested_at": doc.get("ingested_at")})
+        return out
+
+    _hash_cache: dict[str, tuple[float, int, str]] = {}
+
+    def _cached_hash(self, path: Path, st) -> str:
+        key = str(path)
+        hit = self._hash_cache.get(key)
+        if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
+            return hit[2]
+        h = _file_hash(path)
+        self._hash_cache[key] = (st.st_mtime, st.st_size, h)
+        return h
+
     def source_skills(self) -> dict[str, int]:
         """skill -> number of source files on disk (including empty skill folders, as 0)."""
         counts: dict[str, int] = {}
@@ -519,10 +574,15 @@ class KB:
         skipped = 0
         error = None
 
+        progress = INGEST_PROGRESS.setdefault(ingestion_id, {})
+        progress.update(total=len(files), done=0, current=None, failed=0)
         try:
             for path in files:
+                progress["current"] = path.name
                 try:
                     result = self.ingest_file(path, force=force)
+                    if result == "failed":
+                        progress["failed"] += 1
                     if result == "skipped":
                         skipped += 1
                     elif result == "ingested":
@@ -544,7 +604,12 @@ class KB:
                         "ingested_at": time.time(),
                     })
                     error = (error or "") + f"{path.name}: {exc}; "
+                    progress["failed"] += 1
+                progress["done"] += 1
+                self.db.kb_set_ingestion(ingestion_id, "running", files_ingested=ingested,
+                                         files_skipped=skipped, nodes_created=nodes_created)
 
+            progress["current"] = None
             self.db.kb_set_ingestion(
                 ingestion_id, "done",
                 files_ingested=ingested, files_skipped=skipped,

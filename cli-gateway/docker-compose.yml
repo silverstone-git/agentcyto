@@ -74,9 +74,10 @@ services:
       - ../agentcyto/state:/state
       - gateway-state:/gateway-state
       - ${WORKSPACE_DIR:-./workspace}:/workspaces
-      # Knowledge base source, read-only. Each top-level folder is a skill: repo/physics,
-      # repo/history, repo/chemistry, ... (files directly in repo/ belong to KB_DEFAULT_SKILL).
-      - ../repo:/kb-source:ro
+      # Knowledge Bank source. Each top-level folder is a skill: repo/physics, repo/history, ...
+      # (files directly in repo/ belong to KB_DEFAULT_SKILL). Writable so the admin page can create
+      # skills and upload/delete Markdown files; the BFF confines writes to one folder level below.
+      - ../repo:/kb-source
     ports:
       - "127.0.0.1:${BFF_PORT:-8890}:8000"
     depends_on:

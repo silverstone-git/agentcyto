@@ -40,7 +40,7 @@ export default function Trace({ turn, live }: { turn: Turn; live?: boolean }) {
   const { trace, retrieval, thinking } = turn
   const usedWeb = retrieval?.web || trace.some((t) => t.step === 'web')
   const badge = retrieval
-    ? [retrieval.counts ? `${retrieval.counts.kb} KB · ${retrieval.counts.web} web` : `${retrieval.hits.length} passages`, retrieval.method].join(' · ')
+    ? [retrieval.counts ? `${retrieval.counts.kb} Knowledge Bank · ${retrieval.counts.web} web` : `${retrieval.hits.length} passages`, retrieval.method].join(' · ')
     : live ? 'searching…' : ''
   return (
     <div className="max-w-[85%] w-full">

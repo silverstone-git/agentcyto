@@ -46,7 +46,7 @@ POST https://t.aryan.cfd/agentcyto/api/retrieve      (KB retrieval for outstagra
 ```
 /home/ubuntu/cyto/agentcyto/.env
 /home/ubuntu/cyto/agentcyto/workspaces/<hex-session-id>/
-/home/ubuntu/cyto/agentcyto/repo/physics/          (KB source of truth: 13 physics .md files, read-only)
+/home/ubuntu/cyto/agentcyto/repo/physics/          (KB source of truth: 13 physics .md files; writable by the BFF admin upload API)
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/app.py
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/db.py
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/kb.py    (KB ingestion pipeline)

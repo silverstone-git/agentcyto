@@ -228,7 +228,7 @@ export default function ChatPage() {
       return next
     })
     const d = kbDocs.find((x) => x.id === docId)
-    log('info', attachedKb.has(docId) ? 'Detached KB repo' : 'Attached KB repo', d?.title || d?.file_name || docId)
+    log('info', attachedKb.has(docId) ? 'Detached Knowledge Bank document' : 'Attached Knowledge Bank document', d?.title || d?.file_name || docId)
   }
 
   const docSkill = (d: any) => d.skill || 'physics'
@@ -247,13 +247,13 @@ export default function ChatPage() {
 
   const attachAllKB = () => {
     setAttachedKb(new Set(kbDocs.map((d) => d.id)))
-    log('info', 'Attached all KB repos', `${kbDocs.length} repo(s)`)
+    log('info', 'Attached all Knowledge Bank documents', `${kbDocs.length} document(s)`)
   }
 
   const detachAllKB = () => {
     setAttachedKb(new Set())
     setAttachedSkills(new Set())
-    log('info', 'Detached all KB repos')
+    log('info', 'Detached all Knowledge Bank documents')
   }
 
   const resetLive = () => {
@@ -318,7 +318,7 @@ export default function ChatPage() {
     setReplyTo(null)
     inputRef.current?.focus()
 
-    log('info', 'Message queued', (provider ? `custom: ${provider.label}/${provider.model}` : `mode: ${mode} · role: ${role}`) + (kbOn ? ` · KB: ${attachedSkills.size} skill(s), ${attachedKb.size} repo(s)` : ''))
+    log('info', 'Message queued', (provider ? `custom: ${provider.label}/${provider.model}` : `mode: ${mode} · role: ${role}`) + (kbOn ? ` · Knowledge Bank: ${attachedSkills.size} skill(s), ${attachedKb.size} document(s)` : ''))
 
     setPopup(null)
     try {
@@ -440,7 +440,7 @@ export default function ChatPage() {
       patchLive((t) => ({ ...t, thinking: t.thinking + (payload.text || '') }))
     } else if (eventType === 'trace') {
       patchLive((t) => ({ ...t, trace: [...t.trace, payload] }))
-      log(payload.step === 'error' ? 'err' : 'info', `KB ${payload.step}`, payload.text)
+      log(payload.step === 'error' ? 'err' : 'info', `Knowledge Bank ${payload.step}`, payload.text)
     } else if (eventType === 'retrieval') {
       patchLive((t) => ({ ...t, retrieval: payload }))
     } else if (eventType === 'done') {
@@ -702,8 +702,8 @@ export default function ChatPage() {
                   type="button"
                   onClick={() => { setPopup(null); setKbMenu(!kbMenu) }}
                   className={`h-10 w-10 rounded-xl flex items-center justify-center transition-colors ${kbOn ? 'bg-brand-500/15 text-brand-400' : 'text-ink-400 hover:bg-surface-border'}`}
-                  title="Attach knowledge base"
-                  aria-label="Attach knowledge base"
+                  title="Attach from Knowledge Bank"
+                  aria-label="Attach from Knowledge Bank"
                 >
                   <Plus className={`w-5 h-5 transition-transform ${kbMenu ? 'rotate-45' : ''}`} />
                 </button>
@@ -711,14 +711,14 @@ export default function ChatPage() {
                   <>
                     <div className="absolute bottom-12 left-0 z-50 w-72 max-w-[80vw] max-h-72 overflow-y-auto ink-scroll rounded-2xl bg-surface-elevated border border-surface-border shadow-glass p-2 slide-in">
                       <div className="flex items-center justify-between px-2 py-1">
-                        <span className="text-xs font-semibold text-ink-200">Knowledge base</span>
+                        <span className="text-xs font-semibold text-ink-200">Knowledge Bank</span>
                         <span className="flex gap-1">
                           <button type="button" onClick={attachAllKB} className="px-2 py-0.5 rounded-lg text-[10px] bg-surface-border text-ink-300">All</button>
                           <button type="button" onClick={detachAllKB} className="px-2 py-0.5 rounded-lg text-[10px] bg-surface-border text-ink-300">None</button>
                         </span>
                       </div>
                       {kbLoading && <div className="px-2 py-3 text-xs text-ink-500 flex items-center"><Loader2 className="w-3 h-3 animate-spin mr-1" /> Loading…</div>}
-                      {!kbLoading && kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents ingested yet.</div>}
+                      {!kbLoading && kbDocs.length === 0 && <div className="px-2 py-3 text-xs text-ink-500">No documents yet — add some on the Admin page.</div>}
                       {Array.from(new Set(kbDocs.map(docSkill))).sort().map((sk) => {
                         const whole = attachedSkills.has(sk)
                         const docs = kbDocs.filter((d) => docSkill(d) === sk)
@@ -739,7 +739,7 @@ export default function ChatPage() {
                                   <span className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[10px] ${on ? 'bg-brand-500 border-brand-500 text-white' : 'border-ink-600'}`}>{on ? '✓' : ''}</span>
                                   <span className="min-w-0 flex-1">
                                     <span className="block truncate">{d.title || d.file_name}</span>
-                                    <span className="text-[10px] text-ink-500">{d.node_count || 0} nodes · {d.equation_count || 0} eqns</span>
+                                    <span className="text-[10px] text-ink-500">{(d.node_count || 0).toLocaleString()} passages · {(d.equation_count || 0).toLocaleString()} equations</span>
                                   </span>
                                 </button>
                               )
@@ -767,7 +767,7 @@ export default function ChatPage() {
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder={replyTo ? 'Reply…' : kbOn ? (settings.webSearch ? 'Ask — searching your books and the web…' : 'Ask about the attached knowledge base…') : settings.webSearch ? 'Ask — searching the web…' : 'Message agentcyto…'}
+                placeholder={replyTo ? 'Reply…' : kbOn ? (settings.webSearch ? 'Ask — searching your books and the web…' : 'Ask about your Knowledge Bank…') : settings.webSearch ? 'Ask — searching the web…' : 'Message agentcyto…'}
                 rows={1}
                 className="flex-1 min-w-0 resize-none bg-transparent border-none outline-none py-2 text-ink-100 text-sm leading-relaxed focus:ring-0 placeholder-ink-600"
                 onKeyDown={(e) => {

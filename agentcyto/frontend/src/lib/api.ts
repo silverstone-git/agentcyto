@@ -132,6 +132,33 @@ export interface KbStatus {
   total_equations: number
   total_symbols: number
   latest_ingestion: any | null
+  skills?: number
+  default_skill?: string
+  writable?: boolean
+  active_ingestion?: KbActiveIngestion | null
+}
+
+export interface KbActiveIngestion {
+  id: string
+  total: number
+  done: number
+  current: string | null
+  failed: number
+}
+
+export type KbFileState = 'ready' | 'changed' | 'new' | 'failed' | 'missing'
+
+export interface KbSkillFile {
+  file_name: string
+  doc_id: string
+  size: number
+  modified: number | null
+  state: KbFileState
+  title: string
+  nodes: number
+  equations: number
+  error?: string | null
+  ingested_at?: number | null
 }
 
 export interface KbSkill {
@@ -222,5 +249,40 @@ export const api = {
   kbConcepts: (doc?: string) =>
     apiGet(`kb/concepts${doc ? `?doc=${doc}` : ''}`),
   kbIngestions: () => apiGet('kb/ingestions'),
+  kbIngestion: (id: string) => apiGet(`kb/ingestions/${id}`),
+  kbCreateSkill: (skill: string) => apiPost(`kb/skills/${encodeURIComponent(skill)}`, {}) as Promise<KbSkill>,
+  kbDeleteSkill: (skill: string) => apiDelete(`kb/skills/${encodeURIComponent(skill)}`),
+  kbSkillFiles: (skill: string) =>
+    apiGet(`kb/skills/${encodeURIComponent(skill)}/files`) as Promise<{ skill: string; title: string; exists: boolean; files: KbSkillFile[] }>,
+  kbDeleteFile: (skill: string, name: string) =>
+    apiDelete(`kb/skills/${encodeURIComponent(skill)}/files/${encodeURIComponent(name)}`),
+  kbUploadFile,
   kbEnrich: (model: string) => apiPost('kb/enrich', { model }),
+}
+
+/** Upload a file in chunks: each request stays below nginx's 1 MB default body limit. */
+const UPLOAD_CHUNK = 512 * 1024
+
+export async function kbUploadFile(skill: string, name: string, file: Blob, onProgress?: (fraction: number) => void) {
+  const url = `${BASE}/api/kb/skills/${encodeURIComponent(skill)}/files/${encodeURIComponent(name)}`
+  let offset = 0
+  let result: any = null
+  do {
+    const chunk = file.slice(offset, offset + UPLOAD_CHUNK)
+    const final = offset + chunk.size >= file.size
+    const res = await fetch(`${url}?offset=${offset}${final ? '&final=true' : ''}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: chunk,
+    })
+    if (!res.ok) {
+      let detail = res.status === 413 ? 'File chunk rejected by the server (too large).' : res.statusText
+      try { detail = (await res.json()).detail || detail } catch (_) { /* keep */ }
+      throw new Error(detail)
+    }
+    result = await res.json()
+    offset += chunk.size
+    onProgress?.(file.size ? offset / file.size : 1)
+  } while (offset < file.size)
+  return result as { status: string; file_name: string; size: number; doc_id: string; replaced: boolean }
 }

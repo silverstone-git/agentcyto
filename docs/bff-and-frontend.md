@@ -53,6 +53,9 @@ Non-secret options are stored in `jobs.options` (JSON).
   location = /agentcyto/api/retrieve {
       auth_basic off;
       proxy_pass http://127.0.0.1:8890/api/retrieve;
+      # No basic auth here, so never forward a client-supplied X-Auth-User: the BFF treats that
+      # header as "logged in", which would bypass the bearer check.
+      proxy_set_header X-Auth-User "";
       proxy_read_timeout 180s;
       add_header Cache-Control "no-store" always;
   }

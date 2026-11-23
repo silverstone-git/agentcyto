@@ -37,7 +37,7 @@ must never be forgotten, the current status and the repository map; everything e
 - Muse Code support added to the custom provider; all four CLI families work (`claude`, `agy`, `muse`, plus agent variants).
 - Preference aliases `heavy`, `heavy-tool`, `light`, `light-tool` exist with ordered fallback chains.
 - BFF on `127.0.0.1:8890`: SQLite session/message/job journal, durable workers, SSE replay, usage/budget guard, KB retrieval with a visible trace (details: `docs/bff-and-frontend.md`).
-- **React + Vite + TypeScript + Tailwind v4 frontend** (`agentcyto/frontend` → `agentcyto/ui`): Apple-style dark UI, mobile-first drawers, streaming answers with Markdown + KaTeX, collapsible retrieval/thinking panels, clickable citations that open the source passage, KB `+` menu and chips in the composer, swipe/hover reply, per-chat rename / AI auto-name / delete, lazily created chats, system-log drawer, separate password-gated admin page for KB ingestion.
+- **React + Vite + TypeScript + Tailwind v4 frontend** (`agentcyto/frontend` → `agentcyto/ui`): Apple-style dark UI, mobile-first drawers, streaming answers with Markdown + KaTeX, collapsible retrieval/thinking panels, clickable citations that open the source passage, KB `+` menu and chips in the composer, swipe/hover reply, per-chat rename / AI auto-name / delete, lazily created chats, system-log drawer, separate password-gated **Knowledge Bank** admin page (create skills, drag-and-drop chunked upload, auto-ingest with live progress, per-file state). User-facing text always says "Knowledge Bank"; "KB" is an internal term only.
 - `cli_provider.py` scopes CLI sessions and agent workspaces to a browser session via `X-Agentcyto-Session`.
 - nginx route `/agentcyto/` with basic auth is live on `https://t.aryan.cfd/agentcyto/`.
 - **Retrieval v2** (2026-11-22): LLM-planned, outline-aware KB search + rerank (default on, toggle
@@ -90,7 +90,7 @@ must never be forgotten, the current status and the repository map; everything e
 │   └── scripts/
 │       └── deploy.sh             # htpasswd + nginx test/reload
 │
-├── repo/<skill>/                 # KB source of truth, one folder per skill (physics: 13 Markdown files, ~26MB), read-only
+├── repo/<skill>/                 # KB source of truth, one folder per skill (physics: 13 Markdown files, ~26MB); mounted rw for admin uploads
 └── cli-gateway/
     ├── .env                      # non-secret Compose settings (APP_UID, WORKSPACE_DIR, timeouts…)
     ├── .env.example              # template

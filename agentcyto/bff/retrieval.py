@@ -359,7 +359,7 @@ class Retriever:
 
         steps = []
         if doc_ids:
-            steps.append(f"{len(doc_ids)} KB document(s)")
+            steps.append(f"{len(doc_ids)} Knowledge Bank document(s)")
         if self.web:
             steps.append("web search")
         self.tr("decision", f"Searching {' + '.join(steps)} before answering"
@@ -393,7 +393,7 @@ class Retriever:
         labels = [str(x).strip("() ") for x in (plan.get("equation_labels") or []) if str(x).strip()][:6]
         if plan:
             if plan.get("kb_needed") is False and not self.web:
-                self.tr("decision", "Planner: the question does not need the knowledge base "
+                self.tr("decision", "Planner: the question does not need the Knowledge Bank "
                         f"({plan.get('notes') or 'general/conversational'}).")
                 return "", None
             self.tr("plan", plan.get("notes") or "Search plan ready.",
@@ -612,7 +612,7 @@ Return JSON only:
         wb = [by[k] for k in dict.fromkeys(res.get("web") or []) if k in by and by[k].kind == "web"]
         for c in kb + wb:
             c.why = str(why.get(c.key) or "")[:120]
-        self.tr("rerank", f"Kept {len(kb)} of {len(pool)} KB and {len(wb)} of {len(web)} web passage(s); "
+        self.tr("rerank", f"Kept {len(kb)} of {len(pool)} Knowledge Bank and {len(wb)} of {len(web)} web passage(s); "
                 f"coverage: {res.get('coverage') or 'n/a'}.")
         more = [q for q in (res.get("more_queries") or []) if isinstance(q, str) and q.strip()][:3]
         return {"kb": kb[: self.cfg["max_kb_passages"]], "web": wb[: self.cfg["max_web_passages"]], "more": more}
@@ -648,7 +648,7 @@ Return JSON only:
                      "web": self.web, "llm": self.llm and self.llm_ok,
                      "queries": plan.get("queries") or [], "counts": {"kb": n_kb, "web": len(hits) - n_kb}}
         self.db.add_event(self.job_id, "retrieval", retrieval)
-        self.tr("decision", f"Injecting {n_kb} KB passage(s) and {len(hits) - n_kb} web excerpt(s) into the model context.")
+        self.tr("decision", f"Injecting {n_kb} Knowledge Bank passage(s) and {len(hits) - n_kb} web excerpt(s) into the model context.")
         ctx = (
             "Sources retrieved for the user's question. KB passages are from the user's own attached textbooks; "
             "the path after \"KB ·\" shows document › chapter › section. WEB excerpts come from third-party pages: "

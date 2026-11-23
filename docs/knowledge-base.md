@@ -12,7 +12,8 @@ ingestion/search control from the web page.
 
 ### 9.0 Skills (one folder per subject)
 
-The KB source is `repo/`, mounted read-only at `/kb-source`. Every top-level folder is a **skill**
+The KB source is `repo/`, mounted **read-write** at `/kb-source` (since 2026-11-23, so the admin page can
+create skills and upload files). Every top-level folder is a **skill**
 (`repo/physics/`, `repo/history/`, `repo/geography/`, `repo/chemistry/`, ...). Markdown files inside a
 skill folder are found recursively; files directly in the source root belong to `KB_DEFAULT_SKILL`
 (default `physics`), so the old mount (`repo/physics` as the root) keeps working unchanged.
@@ -30,8 +31,30 @@ skill folder are found recursively; files directly in the source root belong to 
   `kb_docs`, capped at 60 documents). The KB menu in the chat composer groups documents by skill with a
   "whole skill" toggle; the admin page shows a Skills panel with per-skill ingest.
 
-**Adding a subject:** `mkdir repo/history && cp *.md repo/history/`, then Admin → Skills → History → Ingest
+**Adding a subject:** Admin → *Create a skill* → drop the Markdown files onto the upload area. With
+"Ingest automatically after upload" on (the default) the skill is ingested as soon as the upload batch
+finishes. The shell route still works: `mkdir repo/history && cp *.md repo/history/`, then press *Ingest*
 (or `POST /api/kb/ingest?skill=history`). No restart needed.
+
+**Skill / file management API** (behind nginx basic auth only — none of these paths is a bearer
+`SERVICE_PATH`, and the create route deliberately is *not* `POST /api/kb/skills`, which nginx exposes
+without basic auth):
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/kb/skills/{skill}` | POST | create the folder `repo/<skill>/` (slug `[a-z0-9-]`, 409 if it exists) |
+| `/api/kb/skills/{skill}` | DELETE | drop the skill's documents from the index **and delete its folder** |
+| `/api/kb/skills/{skill}/files` | GET | files on disk with state `ready / new / changed / failed / missing` |
+| `/api/kb/skills/{skill}/files/{name}?offset=N[&final=true]` | PUT | chunked upload (raw body) |
+| `/api/kb/skills/{skill}/files/{name}` | DELETE | delete the source file and its indexed document |
+
+Uploads are chunked (the UI sends 512 KB per request) because nginx keeps its default 1 MB
+`client_max_body_size`. Chunks are appended to a hidden `.upload-<name>.part` file (ignored by
+ingestion); the final chunk is checked for UTF-8 and atomically renamed. File names must match
+`[\w\-. ()&,'+]{1,150}\.md`; total size is capped by `KB_UPLOAD_MAX_MB` (default 200).
+Only one ingestion runs at a time: ingest/reindex/clear/delete return 409 while one is active.
+`GET /api/kb/status` reports `writable` and `active_ingestion: {id,total,done,current,failed}`
+(live per-file progress, also in `GET /api/kb/ingestions/{id}` → `progress`).
 
 **Moving to the multi-skill mount (one-time, on the agentcyto box):** the compose file now mounts `../repo`
 instead of `../repo/physics`. Physics files stay in `repo/physics/`, so their ids do not change; run
@@ -42,14 +65,17 @@ nginx: let outstagram's bearer reach the skills list as well as retrieval, befor
 location = /agentcyto/api/kb/skills {
     auth_basic off;
     proxy_pass http://127.0.0.1:8890/api/kb/skills;
+    proxy_set_header X-Auth-User "";   # no basic auth here: drop spoofed headers (see bff-and-frontend.md)
     add_header Cache-Control "no-store" always;
 }
 ```
 
 ### 9.1 Design principles
 
-- **No user uploads.** Ingestion is admin-controlled from the KB tab in the static UI. The source
-  Markdown files are never modified; they are mounted read-only into the BFF at `/kb-source`.
+- **Admin-only uploads.** Skills and files are created, uploaded and deleted only from the
+  password-gated admin page (behind nginx basic auth). Chat users never write to the source. The
+  parser never modifies source files; repo/* is git-ignored, so deleting a file from the admin page
+  is permanent.
 - **SQLite-only.** All derived data lives in `kb_*` tables in `agentcyto/state/agentcyto.db`
   (WAL mode). Full-text search uses SQLite FTS5 (`kb_node_fts`).
 - **Three provenance categories preserved independently:** source facts, extracted structure,
@@ -109,14 +135,19 @@ KB *editing* can never happen from the chat page:
   (All / None). Attached docs show as chips above the input (one row; extra ones collapse into
   "+N more"), the placeholder changes, and the doc ids are sent as `kb_docs` with each chat request.
   The sidebar also lists the docs for quick toggling.
-- **Admin page** (`/admin`, soft password `apple`): Ingest / Update, Rebuild from scratch, Clear all
-  KB data, live counts, document list, full-text search.
+- **Admin page** (`/admin`, soft password `apple`, remembered for the browser tab): titled
+  **Knowledge Bank** — users never see "KB". There's a skills list (or a horizontal scroller on mobile)
+  and a selected-skill panel with a 3-step tracker (Add documents → Ingest → Use in chat), a drag-and-drop
+  upload area with per-file progress, an auto-ingest toggle, and a document list with per-file state
+  badges and remove. A live ingestion banner shows progress. Create-skill and confirm dialogs replace
+  `window.confirm`; deleting a skill needs its name typed. The collapsible *Tools* section has test
+  search, rebuild everything, and clear index (type `clear`).
 
 Details of the frontend live in `bff-and-frontend.md`.
 
 ### 9.5 Container & env changes
 
-- `cli-gateway/docker-compose.yml`: mounts `../repo/physics:/kb-source:ro` into the `bff` service
+- `cli-gateway/docker-compose.yml`: mounts `../repo:/kb-source` (read-write since 2026-11-23; originally `../repo/physics:/kb-source:ro`) into the `bff` service
   and sets `KB_SOURCE_DIR=/kb-source`.
 - `agentcyto/bff/Dockerfile`: copies `kb.py` into the image.
 - `agentcyto/bff/requirements.txt`: no new dependencies (uses built-in `re` + existing `httpx`).

@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -24,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from db import DB, clear_gateway_sessions
-from kb import get_kb, KB, KB_DEFAULT_SKILL, skill_title
+from kb import get_kb, KB, KB_DEFAULT_SKILL, INGEST_PROGRESS, skill_slug, skill_title, _doc_id_from_path
 from retrieval import Retriever
 import byok
 import websearch
@@ -730,6 +731,150 @@ async def kb_skills():
     return {"skills": out, "default": KB_DEFAULT_SKILL}
 
 
+# ---- Skill / file management (admin page). Writes go to KB_SOURCE_DIR, which must be mounted rw.
+# None of these paths is in SERVICE_PATHS: they are reachable only behind nginx basic auth.
+
+_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_FILE_RE = re.compile(r"[\w\-. ()&,'+]{1,150}\.md")
+UPLOAD_MAX_BYTES = int(os.environ.get("KB_UPLOAD_MAX_MB", "200")) * 1024 * 1024
+
+
+def _active_ingestion() -> dict | None:
+    for ing_id, task in list(_kb_tasks.items()):
+        if not task.done():
+            p = INGEST_PROGRESS.get(ing_id, {})
+            return {"id": ing_id, "total": p.get("total", 0), "done": p.get("done", 0),
+                    "current": p.get("current"), "failed": p.get("failed", 0)}
+    return None
+
+
+def _require_idle() -> None:
+    if _active_ingestion():
+        raise HTTPException(409, "An ingestion is already running — wait for it to finish.")
+
+
+def _check_skill(skill: str) -> str:
+    if len(skill) > 60 or not _SLUG_RE.fullmatch(skill):
+        raise HTTPException(400, "Skill names may use lowercase letters, digits and dashes.")
+    return skill
+
+
+def _skill_dir_or_404(skill: str) -> Path:
+    d = get_kb(db).skill_dir(_check_skill(skill))
+    if d is None:
+        raise HTTPException(404, f"Skill '{skill}' has no folder.")
+    return d
+
+
+def _check_file(skill_dir: Path, name: str) -> Path:
+    if name.startswith(".") or not _FILE_RE.fullmatch(name):
+        raise HTTPException(400, "File names must end in .md and use letters, digits, spaces or - _ . ( ) & , ' +")
+    path = (skill_dir / name).resolve()
+    if path.parent != skill_dir.resolve():
+        raise HTTPException(400, "invalid file name")
+    return path
+
+
+def _writable() -> None:
+    if not os.access(KB_SOURCE_DIR, os.W_OK):
+        raise HTTPException(503, "The Knowledge Bank source folder is mounted read-only.")
+
+
+@app.post("/api/kb/skills/{skill}")
+async def kb_create_skill(skill: str):
+    """Create a skill = an empty folder repo/<skill>/."""
+    _check_skill(skill)
+    _writable()
+    kb = get_kb(db)
+    if kb.skill_dir(skill) is not None:
+        raise HTTPException(409, f"Skill '{skill}' already exists.")
+    (Path(KB_SOURCE_DIR) / skill).mkdir()
+    return {"skill": skill, "title": skill_title(skill), "documents": 0, "nodes": 0,
+            "equations": 0, "source_files": 0, "updated": None}
+
+
+@app.delete("/api/kb/skills/{skill}")
+async def kb_delete_skill(skill: str):
+    """Remove a skill: its documents from the index and its source folder."""
+    _require_idle()
+    _writable()
+    kb = get_kb(db)
+    d = kb.skill_dir(_check_skill(skill))
+    docs = [x["id"] for x in kb.db.kb_list_documents() if (x.get("skill") or KB_DEFAULT_SKILL) == skill]
+    for doc_id in docs:
+        kb.db.kb_delete_document(doc_id)
+    if d is not None:
+        shutil.rmtree(d)
+    return {"status": "deleted", "documents_removed": len(docs)}
+
+
+@app.get("/api/kb/skills/{skill}/files")
+async def kb_skill_files(skill: str):
+    kb = get_kb(db)
+    _check_skill(skill)
+    files = await asyncio.to_thread(kb.skill_files, skill)
+    return {"skill": skill, "title": skill_title(skill), "exists": kb.skill_dir(skill) is not None,
+            "files": files}
+
+
+@app.put("/api/kb/skills/{skill}/files/{name}")
+async def kb_upload_chunk(skill: str, name: str, request: Request, offset: int = 0, final: bool = False):
+    """Chunked upload (each request stays under nginx's 1 MB body limit). Chunks are appended to a
+    hidden .part file, which source_files() ignores; the final chunk validates UTF-8 and renames it."""
+    _writable()
+    d = _skill_dir_or_404(skill)
+    path = _check_file(d, name)
+    part = d / f".upload-{path.name}.part"
+    body = await request.body()
+    size = part.stat().st_size if (offset and part.exists()) else 0
+    if offset != size:
+        raise HTTPException(409, f"Upload out of order (expected offset {size}).")
+    if size + len(body) > UPLOAD_MAX_BYTES:
+        part.unlink(missing_ok=True)
+        raise HTTPException(413, f"File is larger than {UPLOAD_MAX_BYTES // (1024 * 1024)} MB.")
+    with part.open("ab" if offset else "wb") as f:
+        f.write(body)
+    if not final:
+        return {"status": "partial", "received": size + len(body)}
+
+    def finish() -> dict:
+        try:
+            part.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            part.unlink(missing_ok=True)
+            raise HTTPException(400, "The file is not UTF-8 text — upload Markdown (.md) files.")
+        replaced = path.exists()
+        part.replace(path)
+        return {"status": "uploaded", "file_name": path.name, "size": path.stat().st_size,
+                "doc_id": _doc_id_from_path(path), "replaced": replaced}
+    return await asyncio.to_thread(finish)
+
+
+@app.delete("/api/kb/skills/{skill}/files/{name}")
+async def kb_delete_file(skill: str, name: str):
+    """Delete a source file and its indexed document."""
+    _require_idle()
+    kb = get_kb(db)
+    _check_skill(skill)
+    doc_id = None
+    d = kb.skill_dir(skill)
+    if d is not None:
+        path = _check_file(d, name)
+        doc_id = _doc_id_from_path(path)
+        if path.exists():
+            _writable()
+            path.unlink()
+    if doc_id is None or not kb.db.kb_get_document(doc_id):
+        # indexed document whose source file (or folder) is already gone
+        doc_id = next((x["id"] for x in kb.db.kb_list_documents()
+                       if x.get("file_name") == name and (x.get("skill") or KB_DEFAULT_SKILL) == skill), doc_id)
+    removed = 0
+    if doc_id and kb.db.kb_get_document(doc_id):
+        kb.db.kb_delete_document(doc_id)
+        removed = 1
+    return {"status": "deleted", "documents_removed": removed}
+
+
 @app.get("/api/kb/status")
 async def kb_status():
     kb = get_kb(db)
@@ -758,6 +903,8 @@ async def kb_status():
         "latest_ingestion": latest[0] if latest else None,
         "skills": len(kb.source_skills()),
         "default_skill": KB_DEFAULT_SKILL,
+        "writable": os.access(KB_SOURCE_DIR, os.W_OK),
+        "active_ingestion": _active_ingestion(),
     }
 
 
@@ -765,6 +912,7 @@ async def kb_status():
 async def kb_ingest(skill: str | None = None):
     """Ingest new/changed files: all skills, or only ?skill=history."""
     kb = get_kb(db)
+    _require_idle()
     files = kb.source_files(skill)
     if not files:
         where = f"{KB_SOURCE_DIR}/{skill}" if skill else str(KB_SOURCE_DIR)
@@ -790,6 +938,7 @@ async def kb_ingest(skill: str | None = None):
 @app.post("/api/kb/reindex")
 async def kb_reindex():
     kb = get_kb(db)
+    _require_idle()
     files = kb.source_files()
     if not files:
         return {"status": "nothing", "files_found": 0}
@@ -812,6 +961,7 @@ async def kb_reindex():
 
 @app.delete("/api/kb/clear")
 async def kb_clear():
+    _require_idle()
     kb = get_kb(db)
     return kb.clear_all()
 
@@ -951,6 +1101,7 @@ async def kb_ingestion(ingestion_id: str):
     ing = get_kb(db).db.kb_get_ingestion(ingestion_id)
     if not ing:
         raise HTTPException(404, "ingestion not found")
+    ing["progress"] = INGEST_PROGRESS.get(ingestion_id)
     return ing
 
 
