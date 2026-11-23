@@ -69,6 +69,8 @@ All state lives under `cli-gateway/secrets/cli-state/` (git-ignored, mode 700 di
 | Provider keys | Only in root `./.env` and generated `secrets/gateway.env` (chmod 600) |
 | Master key | Only in `gateway.env`; injected into LiteLLM; never sent to browser |
 | Dashboard password | `AUTHKEY` in root `.env`; nginx basic auth (username `agentcyto`) → `.htpasswd-agentcyto` |
+| Knowledge Bank writes | Basic auth **plus** `X-Admin-Token` from an outsie Google sign-in (only accounts in outsie's `OUTSIE_ADMIN_EMAILS`; 2-hour token in the tab's sessionStorage). The BFF re-checks every write with outsie `GET /admin/whoami` (60 s cache, fails closed, outsie's CLI secret refused). agentcyto stores no signing key or allow-list: removing an email from outsie revokes it here within a minute. Header is `X-Admin-Token` because nginx basic auth owns `Authorization` |
+| KB source folder | `repo/` mounted read-write at `/kb-source`; uploads validated (skill slug, `.md` names, UTF-8, `KB_UPLOAD_MAX_MB`), confined to one level below the root, atomic rename |
 | Gateway network | Loopback only (`127.0.0.1:4000`) |
 | BFF network | Loopback only (`127.0.0.1:8890`); rejects API calls without nginx's `X-Auth-User` |
 | CLI credentials | Host files bind-mounted at runtime; never in image layers |

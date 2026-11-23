@@ -162,7 +162,8 @@ Details of the frontend live in `bff-and-frontend.md`.
 
 - `cli-gateway/docker-compose.yml`: mounts `../repo:/kb-source` (read-write since 2026-11-23; originally `../repo/physics:/kb-source:ro`) into the `bff` service
   and sets `KB_SOURCE_DIR=/kb-source`.
-- `agentcyto/bff/Dockerfile`: copies `kb.py` into the image.
+- `agentcyto/bff/Dockerfile`: copies `kb.py` and `admin_gate.py` into the image.
+- `OUTSIE_URL` (default `https://outsie.aryan.cfd`) on the `bff` service: the admin gate's sign-in and token check.
 - `agentcyto/bff/requirements.txt`: no new dependencies (uses built-in `re` + existing `httpx`).
 
 ### 9.6 Verified results (after the 2026-11-22 parser fix, see 9.7)

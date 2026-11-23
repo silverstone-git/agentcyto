@@ -147,6 +147,9 @@ These are cheap, high-value checks before building more layers on top.
 - [ ] TTL cleanup for `./workspaces/<id>/` and Muse prompt temp files.
 - [ ] Structured logging/metrics export (Prometheus) instead of SQLite-only usage table.
 - [ ] Automated test suite beyond `check.sh`/`smoke.sh`.
+- [ ] Live Google sign-in round-trip on `/agentcyto/admin` (sign in → upload → ingest → sign out); confirm the
+      Supabase redirect allow-list has `https://t.aryan.cfd/agentcyto/**`. Server-side gate verified 2026-11-23.
+- [ ] Shell-friendly admin path for ingest/reindex (today it needs a browser-issued token, see `docs/operations.md` §13.7).
 
 ---
 

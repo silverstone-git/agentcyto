@@ -13,6 +13,7 @@ Tailwind CSS v4); the build output goes to `agentcyto/ui/` (committed) and is ba
 | `bff/websearch.py` | Brave Search + SSRF-safe page fetch, Wikipedia/HTML text extraction, passage picking |
 | `bff/db.py` | SQLite schema + helpers (sessions, messages, jobs, job_events, usage, `kb_*`) |
 | `bff/kb.py` | KB ingestion (see `knowledge-base.md`) |
+| `bff/admin_gate.py` | KB admin gate: proxies outsie's Google sign-in, `require_kb_admin` dependency checks `X-Admin-Token` with outsie `GET /admin/whoami` |
 | `bff/byok.py` | Bring-your-own-key upstreams (OpenAI-compatible, Anthropic, Gemini): streaming, model listing, SSRF guard |
 | `bff/modes.yaml` | mode → alias map, budget, price estimates |
 
@@ -61,6 +62,14 @@ Non-secret options are stored in `jobs.options` (JSON).
   }
   ```
 
+### Admin sign-in API
+- `GET /api/admin/auth-config` → `{supabase_url}` (from outsie `/auth/providers`).
+- `POST /api/admin/session` `{auth_code, code_verifier}` → outsie `POST /admin/session` → `{token, email, expires_at}`
+  (2 h; 403 for a Google account not on outsie's admin list).
+- `GET /api/admin/whoami` → `{admin}` for a valid `X-Admin-Token`.
+- Every KB write and `POST /api/admin/reload` depend on `require_kb_admin` (401 `Admin sign-in required`, 503 if
+  outsie is unreachable). List in `knowledge-base.md` §9.0.
+
 ### Session API
 `GET/POST /api/sessions`, `GET/PATCH/DELETE /api/sessions/{id}`, and
 `POST /api/sessions/{id}/autoname` — sends the first ≤4 messages to the `light` alias
@@ -82,7 +91,8 @@ agentcyto/frontend
 └── src
     ├── App.tsx                  # BrowserRouter; basename = PREFIX ('/agentcyto' on the public host, '' in dev)
     ├── lib/prefix.ts            # PREFIX detection (used by every fetch/SSE URL)
-    ├── lib/api.ts               # typed API client
+    ├── lib/api.ts               # typed API client (adds X-Admin-Token when signed in, incl. chunked uploads)
+    ├── lib/adminAuth.ts         # admin Google PKCE sign-in via outsie; token in sessionStorage
     ├── components/layout/       # Shell.tsx (nav drawer), nav.tsx (NavContext + MenuButton)
     ├── components/chat/         # MessageBubble, Markdown (+KaTeX), Trace, CitationModal
     ├── pages/                   # ChatPage, StatusPage, AdminPage
@@ -117,6 +127,10 @@ agentcyto/frontend
   localStorage `agentcyto.settings`; BYOK providers (including keys) in `agentcyto.providers`
   (`lib/providers.ts` holds the presets: OpenAI, Anthropic, Gemini, OpenRouter, Groq, Together, Mistral,
   DeepSeek, xAI, Fireworks, Perplexity, Cerebras, NVIDIA NIM, Moonshot, Cohere, custom).
+- **Admin sign-in:** `AdminPage` shows "Continue with Google" until `lib/adminAuth.ts` holds a session; Google
+  redirects back to `/agentcyto/admin?code=…`, which is exchanged at `/api/admin/session`. A 401 whose detail
+  mentions admin sign-in clears the session (event `agentcyto-admin-signed-out`) and returns to the sign-in card.
+  The Supabase project must list `https://t.aryan.cfd/agentcyto/**` as an Auth redirect URL.
 - **Layout:** the document never scrolls (`html/body/#root` are `height:100%; overflow:hidden`);
   only message list and panels scroll. Mobile: nav is an off-canvas drawer opened by the menu button
   in the top bar; sessions/KB panel is a drawer that closes when a chat is picked.
@@ -130,5 +144,6 @@ docker compose --project-directory cli-gateway up -d bff
 ```
 
 The BFF image copies `ui/` at build time, so **a frontend change is not live until the `bff` image is
-rebuilt**. Debug visually with Playwright (`node_modules/playwright` in `agentcyto/frontend`),
+rebuilt**. The Dockerfile also copies BFF modules by name: a new `.py` file must be added to its `COPY`
+line (missing `admin_gate.py` crash-looped the container on 2026-11-23). Debug visually with Playwright (`node_modules/playwright` in `agentcyto/frontend`),
 logging in to the public URL with basic auth (`agentcyto` / `AUTHKEY`; never print the key).

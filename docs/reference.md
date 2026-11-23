@@ -17,6 +17,9 @@ gateway.env:               LITELLM_MASTER_KEY, NVIDIA_NIM_API_KEY,
                            META_API_KEY, CLAUDE_CODE_OAUTH_TOKEN (empty)
 
 bff.env (BFF only):        BRAVE_API_KEY (web search; optional)
+
+compose (bff, non-secret): OUTSIE_URL (default https://outsie.aryan.cfd; KB admin gate),
+                           KB_SOURCE_DIR, KB_DEFAULT_SKILL, KB_UPLOAD_MAX_MB (default 200)
 ```
 
 ### Key endpoints
@@ -29,7 +32,10 @@ GET  http://127.0.0.1:8890/api/health                 (BFF, needs X-Auth-User)
 POST http://127.0.0.1:8890/api/chat                   (durable job)
 GET  http://127.0.0.1:8890/api/stream?job_id=…&after=0  (SSE replay)
 GET  http://127.0.0.1:8890/api/kb/status              (KB: source dir, counts, latest ingestion)
-POST http://127.0.0.1:8890/api/kb/ingest              (KB: ingest all .md files, idempotent)
+POST http://127.0.0.1:8890/api/kb/ingest              (KB: ingest all .md files, idempotent; needs X-Admin-Token)
+GET  http://127.0.0.1:8890/api/admin/auth-config       (admin: Supabase URL for Google sign-in, proxied from outsie)
+POST http://127.0.0.1:8890/api/admin/session           (admin: {auth_code, code_verifier} → 2-hour admin token via outsie)
+GET  http://127.0.0.1:8890/api/admin/whoami            (admin: checks X-Admin-Token)
 GET  http://127.0.0.1:8890/api/kb/documents           (KB: list documents)
 GET  http://127.0.0.1:8890/api/kb/search?q=…          (KB: FTS5 full-text search)
 GET  http://127.0.0.1:8890/api/kb/equations           (KB: list equations)
@@ -46,10 +52,11 @@ POST https://t.aryan.cfd/agentcyto/api/retrieve      (KB retrieval for outstagra
 ```
 /home/ubuntu/cyto/agentcyto/.env
 /home/ubuntu/cyto/agentcyto/workspaces/<hex-session-id>/
-/home/ubuntu/cyto/agentcyto/repo/physics/          (KB source of truth: 13 physics .md files; writable by the BFF admin upload API)
+/home/ubuntu/cyto/agentcyto/repo/<skill>/          (KB source of truth, one folder per skill; physics: 13 .md files; writable by uid 1001 for admin uploads)
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/app.py
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/db.py
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/kb.py    (KB ingestion pipeline)
+/home/ubuntu/cyto/agentcyto/agentcyto/bff/admin_gate.py  (KB admin gate: outsie sign-in + token check)
 /home/ubuntu/cyto/agentcyto/agentcyto/bff/modes.yaml
 /home/ubuntu/cyto/agentcyto/agentcyto/state/agentcyto.db
 /home/ubuntu/cyto/agentcyto/agentcyto/ui/

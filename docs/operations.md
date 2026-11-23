@@ -167,13 +167,19 @@ Three different agent smoke tests should produce three different IDs.
 
 KB-specific verification:
 ```sh
-# KB endpoints all require X-Auth-User and return 200 after ingestion
+# KB read endpoints require X-Auth-User and return 200 after ingestion
 curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/status
 curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/documents
 curl -sS -H 'X-Auth-User: local' "http://127.0.0.1:8890/api/kb/search?q=equation&limit=5"
 curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/equations?limit=3
 curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/symbols?limit=5
 curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/stats
+
+# Admin gate: writes without a token → 401 "Admin sign-in required"; a bogus token → 401 "…or expired"
+# (that second message also proves outsie is reachable; a 503 means it is not)
+curl -sS -X POST -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/ingest
+curl -sS -X POST -H 'X-Auth-User: local' -H 'X-Admin-Token: bogus' http://127.0.0.1:8890/api/kb/ingest
+docker exec cli-gateway-bff-1 sh -c 'touch /kb-source/.w && rm /kb-source/.w && echo writable'
 ```
 
 ---
@@ -218,11 +224,17 @@ curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/stats
 ### 13.6 Change a mode mapping or budget without a rebuild
 
 1. Edit `agentcyto/bff/modes.yaml` (mode → chat/agent alias, `allow_paid`, `daily_budget_usd`, price estimates).
-2. `POST /api/admin/reload` with `X-Auth-User` set, or restart the `bff` container.
+2. `POST /api/admin/reload` with `X-Auth-User` **and** `X-Admin-Token` (see §13.7), or restart the `bff` container.
 3. Verify `GET /api/modes` and run one chat per changed mode.
 4. BFF code/static UI changes require `docker compose --project-directory cli-gateway build bff && up -d bff`; DB schema changes require a migration (the current `CREATE TABLE IF NOT EXISTS` does not alter existing tables).
 
 ### 13.7 Re-ingest or rebuild the KB
+
+Every write below needs `X-Admin-Token` (since 2026-11-23). The easy path is the admin page. From the shell,
+sign in on the admin page, copy `token` from the tab's sessionStorage key `agentcyto_admin_session` (valid 2 h;
+never paste it into chat or logs), then e.g.
+`curl -X POST -H 'X-Auth-User: local' -H "X-Admin-Token: $TOKEN" http://127.0.0.1:8890/api/kb/ingest`.
+Restarting the `bff` container needs no token and does not re-ingest.
 
 1. `POST /api/kb/ingest` with `X-Auth-User` — ingests all `.md` files in `KB_SOURCE_DIR`; skips files whose SHA-256 is unchanged (idempotent).
 2. `POST /api/kb/reindex` — wipes all KB data and re-ingests from scratch (use after parser/schema changes).
@@ -262,6 +274,12 @@ curl -sS -H 'X-Auth-User: local' http://127.0.0.1:8890/api/kb/stats
 | KB context missing for `heavy`/CLI models | CLI provider drops system messages | passages are prepended to the last *user* message — keep it that way |
 | Equation counts far below `grep -c '$$'` | parser dropped one-line `$$…$$` (fixed) | reindex after parser fixes (`knowledge-base.md` §9.7) |
 | streaming shows one bubble per chunk | stale closure in `handleEvent` (fixed) | live turn stored in refs; do not read `attempt` state inside the SSE handler |
+| `bff` restarting, log `ModuleNotFoundError: No module named 'admin_gate'` (or any new module) | Dockerfile copies BFF files by name | add the file to the `COPY` line in `agentcyto/bff/Dockerfile`, rebuild |
+| admin page: "This Google account is not an admin" | email not in outsie's `OUTSIE_ADMIN_EMAILS` | add it on outsie (agentcyto keeps no list) |
+| admin page bounces back to the sign-in card | admin token expired (2 h) or revoked | sign in again |
+| Google sign-in returns to the wrong place or errors before `/admin` | Supabase redirect allow-list | add `https://t.aryan.cfd/agentcyto/**` to the Supabase project's Auth redirect URLs |
+| KB writes return 503 "Cannot reach outsie" | outsie down or `OUTSIE_URL` wrong | fails closed by design; fix outsie / `OUTSIE_URL`, then `up -d bff` |
+| upload/create skill returns 503 "mounted read-only" or 500 on write | `repo/` not writable by uid 1001 | `sudo chown -R 1001:1001 repo` (or `chmod -R u+w`); check the compose mount has no `:ro` |
 | page scrolls below the footer on phones | `min-height:100vh` > visible viewport | root is `height:100%; overflow:hidden`, shell uses `100dvh` |
 
 Additional caveats:

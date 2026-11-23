@@ -86,7 +86,7 @@ LiteLLM version: pinned `1.110.1` (`litellm[proxy]`).
 | Service | Purpose | Network | Notes |
 |---|---|---|---|
 | `gateway` | long-running LiteLLM proxy | `127.0.0.1:4000` | `restart: unless-stopped`, healthcheck every 30 s, `mem_limit: 2g` |
-| `bff` | FastAPI BFF + static UI | `127.0.0.1:8890` | `restart: unless-stopped`, healthcheck, uid 1001, mounts `../agentcyto/state:/state`, `gateway-state:/gateway-state`, workspaces, plus `../../repo/physics:/kb-source:ro` (KB source of truth) |
+| `bff` | FastAPI BFF + static UI | `127.0.0.1:8890` | `restart: unless-stopped`, healthcheck, uid 1001, mounts `../agentcyto/state:/state`, `gateway-state:/gateway-state`, workspaces, plus `../repo:/kb-source` read-write (KB source of truth, one folder per skill; host folder must be writable by uid 1001). Env `OUTSIE_URL` for the admin gate |
 | `cli` | on-demand tool container | none (profile `tools`) | same image/env/volumes; used for `check.sh`, `smoke.sh`, `sessions.sh`, logins |
 
 Shared environment anchor `x-gateway-env`:

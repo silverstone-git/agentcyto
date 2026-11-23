@@ -12,6 +12,7 @@ must never be forgotten, the current status and the repository map; everything e
 - Invoke scripts as `bash cli-gateway/scripts/<name>.sh` (they are currently mode `0644`, not executable).
 - Validate after every config change: `python3 -m py_compile`, YAML/JSON parse, `docker compose config --quiet`, then `check.sh` and `smoke.sh`.
 - After any frontend change: `npm run build` in `agentcyto/frontend`, then rebuild + restart the `bff` image (the UI is baked into it).
+- When adding a new BFF Python module, add it to the explicit `COPY` list in `agentcyto/bff/Dockerfile`, or the container crash-loops on import.
 - Keep the gateway bound to `127.0.0.1:4000`. Public exposure is only through the future BFF + nginx route.
 - Preserve per-conversation workspace isolation. Agent models must never share a working directory.
 
@@ -28,7 +29,7 @@ must never be forgotten, the current status and the repository map; everything e
 
 ## 1. Scope and current status
 
-**Date of this document:** 2026-11-22
+**Date of this document:** 2026-11-23
 
 **Completed locally (Phases 0–5 of `MASTER_PLAN.md`):**
 - Root `./.env` holds all provider keys; `cli-gateway/secrets/gateway.env` is generated from it.
@@ -43,6 +44,11 @@ must never be forgotten, the current status and the repository map; everything e
 - **Retrieval v2** (2026-11-22): LLM-planned, outline-aware KB search + rerank (default on, toggle
   "LLM-assisted search"), stemmed breadcrumb FTS index, optional Brave web search with page scraping
   (globe toggle, clickable web citations). Details: `docs/knowledge-base.md` §9.7–9.8.
+- **Knowledge Bank admin gate** (2026-11-23): every KB write (create/delete skill, chunked upload/delete, ingest,
+  reindex, clear, enrich, delete document, reload modes) needs `X-Admin-Token` from an outsie Google sign-in,
+  checked against outsie `GET /admin/whoami` (`bff/admin_gate.py`, fails closed). The old `apple` password is gone.
+  `repo/` is mounted read-write and must stay writable by `APP_UID` (1001). Details: `docs/knowledge-base.md` §9.0,
+  `docs/secrets-and-security.md` §12.
 - **Knowledge Base (KB)**: SQLite-only (`kb_*` tables + FTS5) compiled from `repo/<skill>/` (one folder per subject: physics, history, ...) by `kb.py`; see `docs/knowledge-base.md` §9.0. Current verified totals: 13 documents, 103,039 nodes, 27,375 equations, 1,452 symbols (an earlier parser bug had dropped one-line `$$…$$` equations; fixed 2026-11-22 — see `docs/knowledge-base.md` §9.7). Attached KB docs are searched per chat turn (FTS5/bm25) and injected into the prompt; admin editing lives on a separate page gated by outsie Google sign-in (`bff/admin_gate.py`).
 - Git repository initialised with a baseline commit; no secret files tracked.
 
@@ -50,6 +56,7 @@ must never be forgotten, the current status and the repository map; everything e
 - Backups, monitoring, failover/fallback drills.
 - Workspace size cap + TTL, per-session/IP rate limiting.
 - KB LLM enrichment stage (summaries, concepts, derivation boundaries via gateway) — implemented but not yet wired into a scheduled job.
+- First real Google sign-in → upload → ingest round-trip on the live admin page.
 - Real-browser reconnect test, Gemini alt-quota and Muse credit measurement (`certbot renew --dry-run` passed).
 
 ---
@@ -77,6 +84,7 @@ must never be forgotten, the current status and the repository map; everything e
 │   │   ├── kb.py                 # KB ingestion pipeline: markdown parser, LaTeX/symbol/equation extraction, FTS5 index
 │   │   ├── retrieval.py          # per-turn retrieval: outline → LLM plan → FTS search → expand → LLM rerank
 │   │   ├── websearch.py          # Brave search, SSRF-safe fetch, Wikipedia/HTML extraction
+│   │   ├── admin_gate.py         # KB admin gate: outsie Google sign-in proxy + X-Admin-Token check
 │   │   ├── modes.yaml            # mode → alias mapping, budget, price estimates
 │   │   ├── requirements.txt
 │   │   └── Dockerfile            # uid 1001, serves UI from /app/ui
