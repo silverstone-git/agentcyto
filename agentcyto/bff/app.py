@@ -1169,6 +1169,20 @@ class RetrieveRequest(BaseModel):
     llm: bool = True                    # LLM planning + rerank (agentcyto's default)
     web: bool = False
     history: list[dict] | None = None   # optional prior turns [{role, content}] for follow-ups
+    # Bigger context for callers that want it (outsie asks for more on paid plans); capped here.
+    max_passages: int | None = Field(default=None, ge=1, le=20)
+    context_chars: int | None = Field(default=None, ge=2000, le=40000)
+
+
+def _retrieve_cfg(req: RetrieveRequest) -> dict:
+    cfg = dict(modes.get("retrieval") or {})
+    if req.max_passages:
+        cfg["max_kb_passages"] = req.max_passages
+        # the reranker needs a pool at least ~3x the passages it keeps
+        cfg["candidate_pool"] = max(int(cfg.get("candidate_pool") or 36), req.max_passages * 3)
+    if req.context_chars:
+        cfg["context_chars"] = req.context_chars
+    return cfg
 
 
 @app.post("/api/retrieve")
@@ -1188,7 +1202,7 @@ async def retrieve(req: RetrieveRequest):
     rid = "rtv-" + uuid.uuid4().hex[:16]
     cap = _CaptureEvents(db)
     r = Retriever(db=cap, kb=kb, job_id=rid, session_id="api:retrieve", gateway_url=GATEWAY_URL,
-                  master_key=MASTER_KEY, cfg=modes.get("retrieval") or {}, llm=req.llm, web=req.web,
+                  master_key=MASTER_KEY, cfg=_retrieve_cfg(req), llm=req.llm, web=req.web,
                   price=lambda m, u: estimate_cost(m, u))
     ctx, info = await r.run(doc_ids, history)
     info = info or {}
