@@ -122,6 +122,7 @@ must never be forgotten, the current status and the repository map; everything e
     │   ├── smoke.sh              # runs tools/smoke.py (optionally with model names)
     │   ├── sessions.sh           # list/clear CLI session map
     │   ├── login.sh              # claude / agy interactive login helpers
+    │   ├── sync-claude-creds.sh  # host ~/.claude -> staged copy (5-day systemd timer)
     │   └── opencode.sh           # renders opencode/opencode.json with master key file path
     │
     ├── opencode/

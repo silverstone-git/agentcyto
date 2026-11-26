@@ -123,6 +123,36 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 
 Never echo `$KEY`.
 
+### 10.10 Claude credentials (refresh + 5-day sync)
+
+`claude-agent` and `heavy`'s primary (`cli/claude@opus`) read OAuth credentials from
+`cli-gateway/secrets/cli-state/claude/.credentials.json`, bind-mounted at `/home/app/.claude`.
+A normal `claude` login on the host writes `~/.claude/.credentials.json`; the container copy does **not**
+update by itself.
+
+Symptom of a stale copy: `smoke.sh claude-agent` returns 401 *"OAuth session expired and could not be
+refreshed"*, and `heavy` silently falls back to `muse-spark` instead of answering `via heavy`.
+
+Manual heal (either):
+```sh
+bash cli-gateway/scripts/login.sh claude        # interactive; prints a long-lived token
+bash cli-gateway/scripts/sync-claude-creds.sh   # host ~/.claude -> staged copy
+```
+
+The sync script only copies host → staged when the staged copy has no usable refresh token **and** the
+host copy is usable; it never overwrites a working token with a stale one. No gateway restart is needed
+(the CLI reads the file per invocation).
+
+Automated: `agentcyto-claude-creds-sync.timer` (in `/etc/systemd/system`) runs the sync at boot and every
+5 days:
+```sh
+systemctl list-timers agentcyto-claude-creds-sync.timer
+journalctl -u agentcyto-claude-creds-sync.service -n 20
+```
+A failed unit means both copies are unusable — run `login.sh claude`. For a credential that does not
+depend on the ~30-day refresh window, use the long-lived token from `login.sh claude` in
+`CLAUDE_CODE_OAUTH_TOKEN` (then the timer is unnecessary).
+
 ---
 
 ---
@@ -258,6 +288,7 @@ Restarting the `bff` container needs no token and does not re-ingest.
 | agent writes into another session's files | shared workspace | keep the hex session id as `workspace_id`; BFF creates the dir and rejects non-hex ids |
 | mid-stream provider death | tokens already sent | not recoverable by LiteLLM; future BFF marks `partial` and retries from checkpoint |
 | CLI model fails and falls back unexpectedly | bad/expired login | check `sessions.sh`, staged credentials, or run `scripts/login.sh` |
+| `claude-agent` 401 "OAuth session expired and could not be refreshed"; `heavy` answers `via muse-spark` | staged `~/.claude` copy has no usable refresh token | run `bash cli-gateway/scripts/sync-claude-creds.sh` (or `login.sh claude`); the 5-day timer usually heals it — see §10.10 |
 | `check.sh` says key EMPTY | wrong key name in `gateway.env` | consult §5.2 mapping |
 | scripts say `Permission denied` | scripts are mode 0644 | invoke with `bash …` or `chmod +x` deliberately |
 | `muse usage` says `no_allowance` | Muse CLI is not subscription-backed | rely on `META_API_KEY`/contributor credit; measure before promoting in chains |

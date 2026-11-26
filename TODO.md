@@ -127,6 +127,9 @@ These are cheap, high-value checks before building more layers on top.
 
 ## P5 — Phase 6: ops, backups, drills
 
+- [x] Claude credential sync: `agentcyto-claude-creds-sync.timer` (boot + every 5 days) heals the staged
+      `~/.claude` copy from the host login when its refresh token is unusable; long-lived
+      `CLAUDE_CODE_OAUTH_TOKEN` remains the no-timer option (`docs/operations.md` §10.10).
 - [ ] Backup cron: tar `gateway-state`, `secrets/cli-state/**`, `secrets/gateway.env`, `agentcyto/state`, `./workspaces` into encrypted off-host storage; document restore.
   - Note: Muse binary is ~417 MB; consider excluding/re-downloading it to save space.
 - [ ] Scheduled `check.sh` + `smoke.sh heavy light`; alert on chain exhaustion.
